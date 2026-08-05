@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openagent-engine"
+version = "0.1.0"
+description = "Local adaptive model inspection, planning, scheduling and hardware runtime engine."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Awais Akhtar", email = "awais918@gmail.com" }
+]
+keywords = [
+  "machine-learning",
+  "inference",
+  "openvino",
+  "onnx",
+  "gguf",
+  "safetensors",
+  "model-runtime",
+  "hardware-acceleration"
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed"
+]
+
+[project.optional-dependencies]
+openvino = [
+  "numpy>=1.26,<3",
+  "openvino>=2024.0"
+]
+genai = [
+  "numpy>=1.26,<3",
+  "openvino>=2024.0",
+  "openvino-genai>=2024.0"
+]
+onnx = [
+  "onnx>=1.16"
+]
+dev = [
+  "build>=1.2",
+  "pytest>=8"
+]
+
+[project.scripts]
+openagent-engine = "openagent_engine.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/awais-akhtar/OpenAgent"
+Source = "https://github.com/awais-akhtar/OpenAgent"
+Issues = "https://github.com/awais-akhtar/OpenAgent/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+openagent_engine = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
