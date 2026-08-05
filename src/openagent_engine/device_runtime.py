@@ -285,7 +285,7 @@ class DirectHardwareClient:
             python = self.accelerator_python
             if not python:
                 raise DirectHardwareError(
-                    "The accelerator runtime is unavailable. Install the optional runtime dependencies and set OPENAGENT_ENGINE_ACCELERATOR_PYTHON."
+                    "The accelerator runtime is unavailable. Install the OpenVINO extras and set KERNELLOOM_ACCELERATOR_PYTHON."
                 )
             root = self.profiler.project_root
             environment = accelerator_environment(root)

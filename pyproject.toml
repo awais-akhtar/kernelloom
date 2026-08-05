@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "openagent-engine"
-version = "0.1.0"
-description = "Local adaptive model inspection, planning, scheduling and hardware runtime engine."
+name = "kernelloom"
+version = "0.2.0"
+description = "Hardware-aware local inference, model serving, and execution planning."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
@@ -37,6 +37,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+llama = [
+  "llama-cpp-python>=0.3.9"
+]
 openvino = [
   "numpy>=1.26,<3",
   "openvino>=2024.0"
@@ -49,24 +52,43 @@ genai = [
 onnx = [
   "onnx>=1.16"
 ]
+server = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34"
+]
+langchain = [
+  "langchain-core>=0.3.40"
+]
+all = [
+  "fastapi>=0.115",
+  "langchain-core>=0.3.40",
+  "llama-cpp-python>=0.3.9",
+  "numpy>=1.26,<3",
+  "openvino>=2024.0",
+  "openvino-genai>=2024.0",
+  "uvicorn[standard]>=0.34"
+]
 dev = [
   "build>=1.2",
-  "pytest>=8"
+  "pytest>=8",
+  "twine>=6"
 ]
 
 [project.scripts]
-openagent-engine = "openagent_engine.cli:main"
+kernelloom = "kernelloom.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/awais-akhtar/OpenAgent"
-Source = "https://github.com/awais-akhtar/OpenAgent"
-Issues = "https://github.com/awais-akhtar/OpenAgent/issues"
+Homepage = "https://github.com/awais-akhtar/kernelloom"
+Documentation = "https://github.com/awais-akhtar/kernelloom#readme"
+Source = "https://github.com/awais-akhtar/kernelloom"
+Issues = "https://github.com/awais-akhtar/kernelloom/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 openagent_engine = ["py.typed"]
+kernelloom = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

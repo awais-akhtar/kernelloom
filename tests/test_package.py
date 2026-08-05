@@ -10,7 +10,7 @@ import openagent_engine
 
 class PackageTests(unittest.TestCase):
     def test_version_and_public_exports(self) -> None:
-        self.assertEqual(openagent_engine.__version__, "0.1.0")
+        self.assertEqual(openagent_engine.__version__, "0.2.0")
         self.assertTrue(callable(openagent_engine.AdaptiveCompiler))
         self.assertTrue(callable(openagent_engine.AdaptiveExecutionEngine))
         self.assertTrue(callable(openagent_engine.EngineStore))
@@ -31,7 +31,7 @@ class PackageTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn('"engine": "adaptive-compiler-runtime"', completed.stdout)
+        self.assertIn('"engine": "kernelloom"', completed.stdout)
 
 
 if __name__ == "__main__":

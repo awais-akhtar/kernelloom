@@ -12,7 +12,7 @@ from .runtime import AdaptiveExecutionEngine
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="openagent-engine")
-    parser.add_argument("--data-dir", default=str(Path.home() / ".openagent-engine"))
+    parser.add_argument("--data-dir", default=str(Path.home() / ".kernelloom"))
     parser.add_argument("--accelerator-python", default="")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

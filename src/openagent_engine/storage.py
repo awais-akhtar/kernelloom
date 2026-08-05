@@ -21,7 +21,7 @@ class EngineStore:
             self.db_path = path.resolve()
         else:
             self.data_dir = path.resolve()
-            self.db_path = self.data_dir / "openagent-engine.sqlite3"
+            self.db_path = self.data_dir / "kernelloom.sqlite3"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.initialize()
 

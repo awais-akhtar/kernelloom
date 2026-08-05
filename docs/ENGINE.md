@@ -1,6 +1,6 @@
-# Engine architecture
+# KernelLoom engine architecture
 
-OpenAgent Engine separates model understanding, planning and execution into
+KernelLoom separates model understanding, planning and execution into
 small modules that applications can use independently.
 
 ## Model frontends

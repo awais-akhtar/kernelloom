@@ -24,7 +24,8 @@ def accelerator_source_root(accelerator_python: str, fallback: Path) -> Path:
 
     candidates: list[Path] = []
     configured = (
-        os.environ.get("OPENAGENT_ENGINE_SOURCE_ROOT", "").strip()
+        os.environ.get("KERNELLOOM_SOURCE_ROOT", "").strip()
+        or os.environ.get("OPENAGENT_ENGINE_SOURCE_ROOT", "").strip()
         or os.environ.get("OPENAGENT_SOURCE_ROOT", "").strip()
     )
     if configured:
@@ -120,6 +121,7 @@ class HardwareProfiler:
         self.data_dir = Path(data_dir).expanduser().resolve()
         self.accelerator_python = (
             accelerator_python
+            or os.environ.get("KERNELLOOM_ACCELERATOR_PYTHON", "")
             or os.environ.get("OPENAGENT_ENGINE_ACCELERATOR_PYTHON", "")
             or os.environ.get("OPENAGENT_ACCELERATOR_PYTHON", "")
         )
@@ -344,7 +346,8 @@ class HardwareProfiler:
 
     def _llama_runtime(self) -> dict[str, Any]:
         executable = (
-            os.environ.get("OPENAGENT_ENGINE_LLAMA_SERVER", "").strip()
+            os.environ.get("KERNELLOOM_LLAMA_SERVER", "").strip()
+            or os.environ.get("OPENAGENT_ENGINE_LLAMA_SERVER", "").strip()
             or os.environ.get("OPENAGENT_LLAMA_SERVER", "").strip()
             or shutil.which("llama-server")
             or ""
@@ -383,7 +386,8 @@ class HardwareProfiler:
             unified_memory=True,
             compute_tops=max(0.5, (os.cpu_count() or 1) * 0.10),
             memory_bandwidth_gbps=float(
-                os.environ.get("OPENAGENT_ENGINE_MEMORY_BANDWIDTH_GBPS")
+                os.environ.get("KERNELLOOM_MEMORY_BANDWIDTH_GBPS")
+                or os.environ.get("OPENAGENT_ENGINE_MEMORY_BANDWIDTH_GBPS")
                 or os.environ.get("OPENAGENT_MEMORY_BANDWIDTH_GBPS", 25)
             ),
             precisions=("fp32", "fp16", "bf16", "int8", "int4", "int3", "int2"),
@@ -423,7 +427,8 @@ class HardwareProfiler:
             unified_memory=integrated,
             compute_tops=12.0 if "arc" in name_lower else 8.0,
             memory_bandwidth_gbps=float(
-                os.environ.get("OPENAGENT_ENGINE_GPU_BANDWIDTH_GBPS")
+                os.environ.get("KERNELLOOM_GPU_BANDWIDTH_GBPS")
+                or os.environ.get("OPENAGENT_ENGINE_GPU_BANDWIDTH_GBPS")
                 or os.environ.get("OPENAGENT_GPU_BANDWIDTH_GBPS", 60 if integrated else 200)
             ),
             precisions=("fp32", "fp16", "bf16", "int8", "int4"),
@@ -448,7 +453,8 @@ class HardwareProfiler:
             unified_memory=True,
             compute_tops=8.0,
             memory_bandwidth_gbps=float(
-                os.environ.get("OPENAGENT_ENGINE_NPU_BANDWIDTH_GBPS")
+                os.environ.get("KERNELLOOM_NPU_BANDWIDTH_GBPS")
+                or os.environ.get("OPENAGENT_ENGINE_NPU_BANDWIDTH_GBPS")
                 or os.environ.get("OPENAGENT_NPU_BANDWIDTH_GBPS", 40)
             ),
             precisions=("fp16", "int8", "int4", "nf4"),

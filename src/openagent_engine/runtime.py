@@ -204,8 +204,9 @@ class AdaptiveExecutionEngine:
         return {
             "status": "ready",
             "project": project,
-            "engine": "adaptive-compiler-runtime",
-            "version": "0.1.0",
+            "engine": "kernelloom",
+            "runtime": "adaptive-compiler-runtime",
+            "version": "0.2.0",
             "hardware_profile": profile.to_dict(),
             "backends": [item.to_dict() for item in self.backends.capabilities(profile)],
             "inventory": dict(counts) if counts else {},
@@ -257,7 +258,8 @@ class AdaptiveExecutionEngine:
             ).fetchone()
         return {
             "status": "ready",
-            "engine": "adaptive-compiler-runtime",
+            "engine": "kernelloom",
+            "runtime": "adaptive-compiler-runtime",
             "inventory": dict(row) if row else {},
             "accelerator_runtime": self.direct.status(),
             "gateway_bound": self.gateway is not None,
