@@ -18,8 +18,17 @@ class ModelConfig:
     data_dir: str = ""
     context_length: int = 4096
     batch_size: int = 512
+    micro_batch_size: int = 0
     threads: int = 0
+    batch_threads: int = 0
     gpu_layers: int = 0
+    use_mmap: bool = True
+    use_mlock: bool = False
+    offload_kqv: bool = True
+    flash_attention: bool = False
+    numa: bool = False
+    chat_format: str = ""
+    seed: int = -1
     max_new_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.9
@@ -40,8 +49,20 @@ class ModelConfig:
             raise ValueError("context_length must be at least 128")
         if self.batch_size < 1:
             raise ValueError("batch_size must be positive")
-        if self.threads < 0:
-            raise ValueError("threads cannot be negative")
+        if self.micro_batch_size < 0 or self.micro_batch_size > self.batch_size:
+            raise ValueError("micro_batch_size must be zero (auto) or no larger than batch_size")
+        if self.threads < 0 or self.batch_threads < 0:
+            raise ValueError("thread counts cannot be negative")
+        if self.gpu_layers < -1:
+            raise ValueError("gpu_layers must be -1 (all), 0 (CPU), or positive")
+        if self.max_new_tokens < 1:
+            raise ValueError("max_new_tokens must be positive")
+        if not 0 <= self.temperature:
+            raise ValueError("temperature cannot be negative")
+        if not 0 < self.top_p <= 1:
+            raise ValueError("top_p must be between 0 and 1")
+        if self.top_k < 0:
+            raise ValueError("top_k cannot be negative")
 
     @property
     def resolved_backend(self) -> str:

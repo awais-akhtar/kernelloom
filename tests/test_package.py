@@ -10,7 +10,7 @@ import openagent_engine
 
 class PackageTests(unittest.TestCase):
     def test_version_and_public_exports(self) -> None:
-        self.assertEqual(openagent_engine.__version__, "0.2.0")
+        self.assertEqual(openagent_engine.__version__, "0.3.0")
         self.assertTrue(callable(openagent_engine.AdaptiveCompiler))
         self.assertTrue(callable(openagent_engine.AdaptiveExecutionEngine))
         self.assertTrue(callable(openagent_engine.EngineStore))

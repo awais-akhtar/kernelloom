@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import asyncio
 import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, AsyncIterator, Iterator, Mapping, Sequence
 
 from .config import ModelConfig
 
@@ -77,6 +78,71 @@ class KernelLoomModel:
         """Return generated text for a prompt or a list of chat messages."""
 
         return self.generate(value, **generation).text
+
+    async def aload(self) -> "KernelLoomModel":
+        """Load without blocking an async application event loop."""
+
+        return await asyncio.to_thread(self.load)
+
+    async def ainvoke(self, value: str | Sequence[Message], **generation: Any) -> str:
+        return (await self.agenerate(value, **generation)).text
+
+    async def achat(self, messages: Sequence[Message], **generation: Any) -> GenerationResult:
+        return await self.agenerate(messages, **generation)
+
+    async def agenerate(
+        self,
+        value: str | Sequence[Message],
+        **generation: Any,
+    ) -> GenerationResult:
+        return await asyncio.to_thread(self.generate, value, **generation)
+
+    async def astream(
+        self,
+        value: str | Sequence[Message],
+        **generation: Any,
+    ) -> AsyncIterator[str]:
+        """Bridge blocking native streaming into async code with cancellation."""
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        cancelled = threading.Event()
+
+        def publish(kind: str, payload: Any) -> None:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
+            except RuntimeError:
+                pass
+
+        def produce() -> None:
+            iterator: Iterator[str] | None = None
+            try:
+                iterator = self.stream(value, **generation)
+                for fragment in iterator:
+                    if cancelled.is_set():
+                        break
+                    publish("token", fragment)
+            except BaseException as exc:
+                publish("error", exc)
+            finally:
+                if iterator is not None:
+                    close = getattr(iterator, "close", None)
+                    if close is not None:
+                        close()
+                publish("done", None)
+
+        worker = threading.Thread(target=produce, name=f"kernelloom-{self.config.model_id}", daemon=True)
+        worker.start()
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == "done":
+                    break
+                if kind == "error":
+                    raise value
+                yield str(value)
+        finally:
+            cancelled.set()
 
     def chat(self, messages: Sequence[Message], **generation: Any) -> GenerationResult:
         return self.generate(messages, **generation)
@@ -192,17 +258,42 @@ class KernelLoomModel:
                 "GGUF execution needs llama-cpp-python. Install KernelLoom with the 'llama' extra."
             ) from exc
         threads = self.config.threads or max(1, (os.cpu_count() or 2) - 1)
+        batch_threads = self.config.batch_threads or threads
+        micro_batch_size = self.config.micro_batch_size or min(128, self.config.batch_size)
         started = time.perf_counter()
+        options: dict[str, Any] = {
+            "model_path": self.config.model_path,
+            "n_ctx": self.config.context_length,
+            "n_batch": self.config.batch_size,
+            "n_ubatch": micro_batch_size,
+            "n_threads": threads,
+            "n_threads_batch": batch_threads,
+            "n_gpu_layers": self.config.gpu_layers,
+            "use_mmap": self.config.use_mmap,
+            "use_mlock": self.config.use_mlock,
+            "offload_kqv": self.config.offload_kqv,
+            "flash_attn": self.config.flash_attention,
+            "numa": self.config.numa,
+            "seed": self.config.seed,
+            "verbose": False,
+        }
+        if self.config.chat_format:
+            options["chat_format"] = self.config.chat_format
         self._backend = Llama(
-            model_path=self.config.model_path,
-            n_ctx=self.config.context_length,
-            n_batch=self.config.batch_size,
-            n_threads=threads,
-            n_threads_batch=threads,
-            n_gpu_layers=self.config.gpu_layers,
-            verbose=False,
+            **options,
         )
-        self._load_info = {"threads": threads, "load_ms": round((time.perf_counter() - started) * 1000, 3)}
+        self._load_info = {
+            "threads": threads,
+            "batch_threads": batch_threads,
+            "batch_size": self.config.batch_size,
+            "micro_batch_size": micro_batch_size,
+            "context_length": self.config.context_length,
+            "gpu_layers": self.config.gpu_layers,
+            "mmap": self.config.use_mmap,
+            "mlock": self.config.use_mlock,
+            "flash_attention": self.config.flash_attention,
+            "load_ms": round((time.perf_counter() - started) * 1000, 3),
+        }
 
     def _load_openvino(self) -> None:
         from openagent_engine import AdaptiveExecutionEngine

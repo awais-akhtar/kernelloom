@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kernelloom"
-version = "0.2.0"
-description = "Hardware-aware local inference, model serving, and execution planning."
+version = "0.3.0"
+description = "Run local AI models smoothly with a developer-friendly Python API and server."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 import json
 import os
-from pathlib import Path
 import threading
 import time
 from typing import Any, Iterator
@@ -13,17 +13,55 @@ from uuid import uuid4
 
 from .config import ModelConfig
 from .model import KernelLoomModel
+from . import __version__
+
+
+@dataclass(slots=True)
+class RuntimeMetrics:
+    requests: int = 0
+    active: int = 0
+    completed: int = 0
+    failed: int = 0
+    generation_seconds: float = 0.0
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def start(self) -> float:
+        with self._lock:
+            self.requests += 1
+            self.active += 1
+        return time.perf_counter()
+
+    def finish(self, started: float, *, failed: bool = False) -> None:
+        with self._lock:
+            self.active = max(0, self.active - 1)
+            self.failed += int(failed)
+            self.completed += int(not failed)
+            self.generation_seconds += time.perf_counter() - started
+
+    def snapshot(self) -> dict[str, int | float]:
+        with self._lock:
+            return {
+                "requests": self.requests,
+                "active": self.active,
+                "completed": self.completed,
+                "failed": self.failed,
+                "generation_seconds": round(self.generation_seconds, 6),
+            }
 
 
 class ModelRegistry:
     """Thread-safe collection of resident models."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_models: int = 4) -> None:
         self._models: dict[str, KernelLoomModel] = {}
         self._lock = threading.RLock()
+        self.max_models = max_models
 
     def load(self, values: dict[str, Any]) -> dict[str, Any]:
         config = ModelConfig(**values)
+        with self._lock:
+            if config.model_id not in self._models and len(self._models) >= self.max_models:
+                raise RuntimeError(f"Model limit reached ({self.max_models}); unload one before loading another")
         model = KernelLoomModel(config).load()
         with self._lock:
             previous = self._models.get(config.model_id)
@@ -59,31 +97,42 @@ class ModelRegistry:
             model.close()
 
 
-def create_app(*, initial_model: ModelConfig | None = None) -> Any:
+def create_app(
+    *,
+    initial_model: ModelConfig | None = None,
+    initial_models: list[ModelConfig] | None = None,
+    max_models: int | None = None,
+) -> Any:
     """Build the FastAPI application without importing server dependencies globally."""
 
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException
-        from fastapi.responses import HTMLResponse, StreamingResponse
+        from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
     except ImportError as exc:
         raise RuntimeError("The web service needs the 'server' extra: pip install kernelloom[server]") from exc
 
-    registry = ModelRegistry()
+    limit = max_models or int(os.environ.get("KERNELLOOM_MAX_MODELS", "4"))
+    registry = ModelRegistry(max_models=limit)
+    metrics = RuntimeMetrics()
 
     @asynccontextmanager
     async def lifespan(_: Any):
+        configured = list(initial_models or [])
         if initial_model is not None:
-            registry.load({key: value for key, value in initial_model.to_dict().items() if key != "resolved_backend"})
+            configured.append(initial_model)
+        for model_config in configured:
+            registry.load({key: value for key, value in model_config.to_dict().items() if key != "resolved_backend"})
         yield
         registry.close()
 
     app = FastAPI(
         title="KernelLoom",
-        version="0.2.0",
-        description="Local model serving with hardware-aware execution.",
+        version=__version__,
+        description="Developer-friendly local model serving with hardware-aware execution.",
         lifespan=lifespan,
     )
     app.state.models = registry
+    app.state.metrics = metrics
 
     def authorize(authorization: str | None = Header(default=None)) -> None:
         expected = os.environ.get("KERNELLOOM_API_KEY", "").strip()
@@ -97,6 +146,24 @@ def create_app(*, initial_model: ModelConfig | None = None) -> Any:
     @app.get("/health")
     def health() -> dict[str, Any]:
         return {"status": "ok", "models": len(registry.list())}
+
+    @app.get("/ready")
+    def ready() -> dict[str, Any]:
+        loaded = [item["id"] for item in registry.list()]
+        return {"ready": bool(loaded), "models": loaded, "capacity": registry.max_models}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def prometheus_metrics() -> str:
+        values = metrics.snapshot()
+        lines = [
+            "# HELP kernelloom_models_loaded Number of resident local models.",
+            "# TYPE kernelloom_models_loaded gauge",
+            f"kernelloom_models_loaded {len(registry.list())}",
+        ]
+        for name, value in values.items():
+            metric = f"kernelloom_{name}"
+            lines.extend((f"# TYPE {metric} {'gauge' if name == 'active' else 'counter'}", f"{metric} {value}"))
+        return "\n".join(lines) + "\n"
 
     @app.get("/v1/models", dependencies=[Depends(authorize)])
     def models() -> dict[str, Any]:
@@ -132,14 +199,17 @@ def create_app(*, initial_model: ModelConfig | None = None) -> Any:
         created = int(time.time())
         if payload.get("stream"):
             return StreamingResponse(
-                _chat_stream(model, messages, settings, request_id, created),
+                _chat_stream(model, messages, settings, request_id, created, metrics),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
+        started = metrics.start()
         try:
             result = model.chat(messages, **settings)
         except Exception as exc:
+            metrics.finish(started, failed=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        metrics.finish(started)
         return {
             "id": request_id,
             "object": "chat.completion",
@@ -156,10 +226,13 @@ def create_app(*, initial_model: ModelConfig | None = None) -> Any:
         prompt = payload.get("prompt", "")
         if not isinstance(prompt, str):
             raise HTTPException(status_code=422, detail="prompt must be a string")
+        started = metrics.start()
         try:
             result = model.generate(prompt, **_generation_settings(payload))
         except Exception as exc:
+            metrics.finish(started, failed=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        metrics.finish(started)
         return {
             "id": f"cmpl-{uuid4().hex}",
             "object": "text_completion",
@@ -197,7 +270,9 @@ def _chat_stream(
     settings: dict[str, Any],
     request_id: str,
     created: int,
+    metrics: RuntimeMetrics,
 ) -> Iterator[str]:
+    started = metrics.start()
     try:
         for text in model.stream(messages, **settings):
             event = {
@@ -218,8 +293,11 @@ def _chat_stream(
         yield f"data: {json.dumps(final)}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as exc:
+        metrics.finish(started, failed=True)
         yield f"data: {json.dumps({'error': {'message': str(exc), 'type': type(exc).__name__}})}\n\n"
         yield "data: [DONE]\n\n"
+    else:
+        metrics.finish(started)
 
 
 _CONSOLE_HTML = r"""<!doctype html>

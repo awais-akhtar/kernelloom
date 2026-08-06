@@ -3,6 +3,8 @@
 KernelLoom separates model understanding, planning and execution into
 small modules that applications can use independently.
 
+For callable examples, see the [compiler and runtime API guide](ENGINE_API.md).
+
 ## Model frontends
 
 `frontends.py` reads bounded metadata from GGUF, SafeTensors, ONNX and OpenVINO
@@ -32,6 +34,10 @@ SQLite persistence. `memory.py` provides paged KV-cache metadata and
 The optional native worker in `worker.py` is launched by `device_runtime.py`.
 It communicates over inherited JSONL pipes and opens no listening socket.
 
+The higher-level `kernelloom.model` module selects llama.cpp for GGUF files and
+the isolated OpenVINO GenAI path for exported model directories. The
+`kernelloom.server` module keeps named instances resident behind HTTP routes.
+
 ## Persistence boundary
 
 `storage.py` is deliberately small. Applications may pass its `EngineStore` to
@@ -48,3 +54,13 @@ which also makes the boundary straightforward to adapt to another host store.
 
 Synthetic hardware probes and full-model verification are separate evidence.
 The package does not treat one as proof of the other.
+
+## Public layers
+
+| Layer | Primary entry point | Intended use |
+| --- | --- | --- |
+| Model API | `KernelLoomModel` | Prompt, chat and streaming generation. |
+| Framework adapter | `KernelLoomChatModel` | LangChain runnables and chat pipelines. |
+| HTTP service | `create_app()` or `kernelloom serve` | Browser testing and OpenAI-compatible clients. |
+| Engine API | `AdaptiveExecutionEngine` | Inspection, planning, direct execution and evidence. |
+| Components | Compiler, frontend, cache and scheduler classes | Custom engine embedding and research. |

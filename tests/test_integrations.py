@@ -38,6 +38,10 @@ def test_http_health_console_models_and_authentication() -> None:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             assert (await client.get("/health")).json() == {"status": "ok", "models": 0}
+            assert (await client.get("/ready")).json() == {"ready": False, "models": [], "capacity": 4}
+            metrics = await client.get("/metrics")
+            assert metrics.status_code == 200
+            assert "kernelloom_models_loaded 0" in metrics.text
             console = await client.get("/")
             assert console.status_code == 200
             assert "KernelLoom" in console.text

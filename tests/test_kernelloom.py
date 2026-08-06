@@ -28,7 +28,7 @@ class FakeLlama:
 
 class KernelLoomTests(unittest.TestCase):
     def test_public_version_and_backend_detection(self) -> None:
-        self.assertEqual(__version__, "0.2.0")
+        self.assertEqual(__version__, "0.3.0")
         self.assertEqual(ModelConfig("model.gguf").resolved_backend, "llama-cpp")
         self.assertEqual(ModelConfig("openvino-model").resolved_backend, "openvino")
 
@@ -47,6 +47,39 @@ class KernelLoomTests(unittest.TestCase):
         self.assertEqual(result.metadata["usage"]["completion_tokens"], 2)
         self.assertEqual(streamed, "local answer")
         self.assertEqual(info["load"]["threads"], 2)
+        self.assertEqual(info["load"]["micro_batch_size"], 128)
+
+    def test_async_model_api(self) -> None:
+        import asyncio
+
+        async def exercise() -> None:
+            with tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "model.gguf"
+                path.write_bytes(b"test")
+                with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
+                    model = KernelLoomModel(ModelConfig(str(path)))
+                    self.assertEqual(await model.ainvoke("Hello"), "local answer")
+                    chunks = [chunk async for chunk in model.astream("Hello")]
+                    self.assertEqual("".join(chunks), "local answer")
+                    model.close()
+
+        asyncio.run(exercise())
+
+    def test_performance_options_reach_llama_cpp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "model.gguf"
+            path.write_bytes(b"test")
+            config = ModelConfig(
+                str(path), batch_size=256, micro_batch_size=64, batch_threads=3,
+                flash_attention=True, use_mlock=True, gpu_layers=-1,
+            )
+            with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
+                model = KernelLoomModel(config).load()
+                self.assertEqual(model._backend.options["n_ubatch"], 64)
+                self.assertEqual(model._backend.options["n_threads_batch"], 3)
+                self.assertTrue(model._backend.options["flash_attn"])
+                self.assertTrue(model._backend.options["use_mlock"])
+                model.close()
 
     def test_system_prompt_is_added_once(self) -> None:
         config = ModelConfig("model.gguf", system_prompt="Be concise.")
