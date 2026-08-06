@@ -17,8 +17,10 @@ ONNX and individual OpenVINO IR files are available through the lower-level
 generic tensor inference API. SafeTensors can be inspected and planned, but
 must be converted before execution.
 
-KernelLoom does not download a model. Obtain it from a source you trust and
-keep its license alongside your application.
+The core model runtime does not download the GGUF file or OpenVINO export passed
+to `ModelConfig`. Obtain model files from a source you trust and keep their
+licenses alongside your application. Optional integrations such as FastEmbed
+can download their own selected models unless they are pre-cached.
 
 ## Install a runtime
 
@@ -91,7 +93,7 @@ config = ModelConfig(
 | `model_path` | GGUF file or OpenVINO GenAI directory. Relative paths are resolved immediately. |
 | `model_id` | Name used by the Python result and HTTP API. |
 | `backend` | `auto`, `llama-cpp` or `openvino`. Auto selects llama.cpp for `.gguf`. |
-| `device` | OpenVINO target such as `CPU`, `GPU`, `NPU`, or `AUTO` (GPU → NPU → CPU). |
+| `device` | OpenVINO target such as `CPU`, `GPU`, `NPU`, or `AUTO`. Auto follows the discovered OpenVINO preference order GPU, NPU, then CPU. |
 | `data_dir` | SQLite state and compiled-cache directory; defaults to `~/.kernelloom`. |
 | `context_length` | llama.cpp context window. Minimum accepted value is 128. |
 | `batch_size` | llama.cpp prompt-processing batch size. |
@@ -280,7 +282,7 @@ Then select a device:
 config = ModelConfig(
     "./models/model-openvino",
     backend="openvino",
-    device="AUTO",  # prefers a verified GPU, then NPU, then CPU
+    device="AUTO",  # discovered OpenVINO GPU, then NPU, then CPU preference
     scheduler={
         "enabled": True,
         "enable_prefix_caching": True,

@@ -1,19 +1,28 @@
-"""OpenAI-compatible HTTP service and local browser console."""
+"""OpenAI-style HTTP service, local control API, and browser console."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+from importlib.resources import files
 import json
 import os
+from pathlib import Path
+import re
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
-from .config import ModelConfig
-from .model import KernelLoomModel
 from . import __version__
+from .config import ModelConfig
+from .cpu import plan_cpu_execution
+from .model import KernelLoomModel
+from .rag import InMemoryVectorStore, RAGConfig, RAGPipeline, SQLiteVectorStore
+
+
+_RESOURCE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass(slots=True)
@@ -50,15 +59,15 @@ class RuntimeMetrics:
 
 
 class ModelRegistry:
-    """Thread-safe collection of resident models."""
+    """Thread-safe collection of resident local models."""
 
     def __init__(self, *, max_models: int = 4) -> None:
         self._models: dict[str, KernelLoomModel] = {}
         self._lock = threading.RLock()
         self.max_models = max_models
 
-    def load(self, values: dict[str, Any]) -> dict[str, Any]:
-        config = ModelConfig(**values)
+    def load(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        config = ModelConfig(**dict(values))
         with self._lock:
             existing = self._models.get(config.model_id)
             if existing is not None and existing.config.to_dict() == config.to_dict():
@@ -85,6 +94,12 @@ class ModelRegistry:
         with self._lock:
             return [model.info() for model in self._models.values()]
 
+    def configurations(self) -> list[dict[str, Any]]:
+        """Return reusable model configuration snapshots under one registry lock."""
+
+        with self._lock:
+            return [_model_config_values(model.config) for model in self._models.values()]
+
     def unload(self, model_id: str) -> bool:
         with self._lock:
             model = self._models.pop(model_id, None)
@@ -106,6 +121,175 @@ class ModelRegistry:
             model.close()
 
 
+class _ResidentGenerator:
+    """RAG adapter that resolves a server-owned model only when it is used."""
+
+    def __init__(self, models: ModelRegistry, model_id: str) -> None:
+        self.models = models
+        self.model_id = model_id
+
+    def invoke(self, prompt: str, **generation: Any) -> str:
+        return self.models.get(self.model_id).invoke(prompt, **generation)
+
+    async def ainvoke(self, prompt: str, **generation: Any) -> str:
+        return await self.models.get(self.model_id).ainvoke(prompt, **generation)
+
+    def warmup(self) -> dict[str, Any]:
+        return self.models.warm(self.model_id)
+
+
+class _ResidentEmbedder:
+    """RAG adapter for a model retained by :class:`ModelRegistry`."""
+
+    def __init__(self, models: ModelRegistry, model_id: str) -> None:
+        self.models = models
+        self.model_id = model_id
+
+    def embed(self, text: str) -> list[float]:
+        return self.models.get(self.model_id).embed(text)
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return self.models.get(self.model_id).embed_many(texts)
+
+    def warmup(self) -> dict[str, Any]:
+        return self.models.warm(self.model_id)
+
+
+@dataclass(slots=True)
+class _RAGCollection:
+    identifier: str
+    model_id: str
+    embedding_model_id: str
+    database: str
+    pipeline: RAGPipeline
+    embedding_signature: str
+    created_at: float
+
+
+class RAGRegistry:
+    """Own RAG stores while leaving resident model ownership with the server."""
+
+    def __init__(self, models: ModelRegistry) -> None:
+        self.models = models
+        self._collections: dict[str, _RAGCollection] = {}
+        self._lock = threading.RLock()
+
+    def create(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        identifier = _resource_id(values.get("id"), label="collection id")
+        model_id = _required_id(values.get("model"), label="model")
+        embedding_model_id = _required_id(values.get("embedding_model"), label="embedding_model")
+        raw_config = values.get("config", {})
+        if not isinstance(raw_config, Mapping):
+            raise ValueError("config must be an object")
+        config = RAGConfig(**dict(raw_config))
+        database = str(values.get("database", "memory")).strip() or "memory"
+
+        with self._lock:
+            if identifier in self._collections:
+                raise ValueError(f"RAG collection '{identifier}' already exists")
+        self.models.get(model_id)
+        embedding_model = self.models.get(embedding_model_id)
+        if not embedding_model.config.embedding:
+            raise ValueError("embedding_model must be loaded with embedding=True")
+
+        store = self._new_store(database)
+        collection = _RAGCollection(
+            identifier=identifier,
+            model_id=model_id,
+            embedding_model_id=embedding_model_id,
+            database=database,
+            pipeline=RAGPipeline(
+                _ResidentGenerator(self.models, model_id),
+                _ResidentEmbedder(self.models, embedding_model_id),
+                store=store,
+                config=config,
+            ),
+            embedding_signature=_embedding_signature(embedding_model),
+            created_at=time.time(),
+        )
+        with self._lock:
+            if identifier in self._collections:
+                collection.pipeline.close()
+                raise ValueError(f"RAG collection '{identifier}' already exists")
+            self._collections[identifier] = collection
+        return self.describe(collection)
+
+    def get(self, identifier: str, *, require_ready: bool = True) -> _RAGCollection:
+        with self._lock:
+            collection = self._collections.get(identifier)
+        if collection is None:
+            raise KeyError(identifier)
+        if require_ready:
+            self._assert_ready(collection)
+        return collection
+
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            collections = list(self._collections.values())
+        return [self.describe(item) for item in collections]
+
+    def delete(self, identifier: str) -> bool:
+        with self._lock:
+            collection = self._collections.pop(identifier, None)
+        if collection is None:
+            return False
+        collection.pipeline.close()
+        return True
+
+    def referenced_by(self, model_id: str) -> bool:
+        with self._lock:
+            return any(
+                item.model_id == model_id or item.embedding_model_id == model_id
+                for item in self._collections.values()
+            )
+
+    def close(self) -> None:
+        with self._lock:
+            collections = list(self._collections.values())
+            self._collections.clear()
+        for collection in collections:
+            collection.pipeline.close()
+
+    def describe(self, collection: _RAGCollection) -> dict[str, Any]:
+        readiness: dict[str, Any] = {"ready": True}
+        try:
+            self._assert_ready(collection)
+        except (KeyError, RuntimeError) as exc:
+            readiness = {"ready": False, "reason": str(exc)}
+        return {
+            "id": collection.identifier,
+            "model": collection.model_id,
+            "embedding_model": collection.embedding_model_id,
+            "database": collection.database,
+            "store": type(collection.pipeline.store).__name__,
+            "config": asdict(collection.pipeline.config),
+            "documents": collection.pipeline.count(),
+            "cache": collection.pipeline.cache_info(),
+            "created_at": round(collection.created_at, 3),
+            **readiness,
+        }
+
+    def _assert_ready(self, collection: _RAGCollection) -> None:
+        self.models.get(collection.model_id)
+        embedding_model = self.models.get(collection.embedding_model_id)
+        if _embedding_signature(embedding_model) != collection.embedding_signature:
+            raise RuntimeError(
+                "The embedding model changed after this collection was indexed. "
+                "Delete and rebuild the collection before querying it."
+            )
+
+    @staticmethod
+    def _new_store(database: str) -> Any:
+        normalized = database.lower()
+        if normalized == "memory":
+            return InMemoryVectorStore()
+        if normalized in {"faiss", "faiss-flat"}:
+            from .faiss_store import FaissVectorStore
+
+            return FaissVectorStore()
+        return SQLiteVectorStore(database)
+
+
 def create_app(
     *,
     initial_model: ModelConfig | None = None,
@@ -116,13 +300,16 @@ def create_app(
 
     try:
         from fastapi import Depends, FastAPI, Header, HTTPException
-        from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+        from fastapi.responses import HTMLResponse, PlainTextResponse, Response, StreamingResponse
     except ImportError as exc:
         raise RuntimeError("The web service needs the 'server' extra: pip install kernelloom[server]") from exc
 
     limit = max_models or int(os.environ.get("KERNELLOOM_MAX_MODELS", "4"))
     registry = ModelRegistry(max_models=limit)
+    rag = RAGRegistry(registry)
     metrics = RuntimeMetrics()
+    hardware_profiler: Any | None = None
+    hardware_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_: Any):
@@ -130,17 +317,19 @@ def create_app(
         if initial_model is not None:
             configured.append(initial_model)
         for model_config in configured:
-            registry.load({key: value for key, value in model_config.to_dict().items() if key != "resolved_backend"})
+            registry.load(_model_config_values(model_config))
         yield
+        rag.close()
         registry.close()
 
     app = FastAPI(
         title="KernelLoom",
         version=__version__,
-        description="Developer-friendly local model serving with hardware-aware execution.",
+        description="Local GGUF and OpenVINO model runtime with Python, HTTP, and RAG APIs.",
         lifespan=lifespan,
     )
     app.state.models = registry
+    app.state.rag = rag
     app.state.metrics = metrics
 
     def authorize(authorization: str | None = Header(default=None)) -> None:
@@ -148,9 +337,26 @@ def create_app(
         if expected and authorization != f"Bearer {expected}":
             raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
+    def profiler() -> Any:
+        nonlocal hardware_profiler
+        with hardware_lock:
+            if hardware_profiler is None:
+                from openagent_engine import HardwareProfiler
+
+                data_dir = os.environ.get("KERNELLOOM_DATA_DIR", "").strip() or str(Path.home() / ".kernelloom")
+                hardware_profiler = HardwareProfiler(data_dir)
+        return hardware_profiler
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def console() -> str:
-        return _CONSOLE_HTML
+        return _web_asset("console.html")
+
+    @app.get("/assets/{asset_name}", include_in_schema=False)
+    def console_asset(asset_name: str) -> Any:
+        media_types = {"console.css": "text/css; charset=utf-8", "console.js": "application/javascript; charset=utf-8"}
+        if asset_name not in media_types:
+            raise HTTPException(status_code=404, detail="Asset not found")
+        return Response(_web_asset(asset_name), media_type=media_types[asset_name])
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -168,6 +374,9 @@ def create_app(
             "# HELP kernelloom_models_loaded Number of resident local models.",
             "# TYPE kernelloom_models_loaded gauge",
             f"kernelloom_models_loaded {len(registry.list())}",
+            "# HELP kernelloom_rag_collections Number of active RAG collections.",
+            "# TYPE kernelloom_rag_collections gauge",
+            f"kernelloom_rag_collections {len(rag.list())}",
         ]
         for name, value in values.items():
             metric = f"kernelloom_{name}"
@@ -184,15 +393,44 @@ def create_app(
             ],
         }
 
+    @app.get("/v1/models/{model_id}", dependencies=[Depends(authorize)])
+    def model_detail(model_id: str) -> dict[str, Any]:
+        try:
+            model = registry.get(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Model is not loaded") from exc
+        return {**model.info(), "config": _model_config_values(model.config)}
+
     @app.post("/v1/models/load", dependencies=[Depends(authorize)])
     def load_model(payload: dict[str, Any]) -> dict[str, Any]:
         try:
+            candidate = ModelConfig(**payload)
+            try:
+                current = registry.get(candidate.model_id)
+            except KeyError:
+                current = None
+            if (
+                current is not None
+                and current.config.to_dict() != candidate.to_dict()
+                and rag.referenced_by(candidate.model_id)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This model is used by a RAG collection. Delete that collection before replacing the model.",
+                )
             return registry.load(payload)
+        except HTTPException:
+            raise
         except (FileNotFoundError, ImportError, RuntimeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.delete("/v1/models/{model_id}", dependencies=[Depends(authorize)])
     def unload_model(model_id: str) -> dict[str, Any]:
+        if rag.referenced_by(model_id):
+            raise HTTPException(
+                status_code=409,
+                detail="This model is used by a RAG collection. Delete that collection before unloading the model.",
+            )
         if not registry.unload(model_id):
             raise HTTPException(status_code=404, detail="Model is not loaded")
         return {"id": model_id, "deleted": True}
@@ -213,6 +451,181 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="Model is not loaded") from exc
         except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/models/{model_id}/cache/clear", dependencies=[Depends(authorize)])
+    def clear_model_cache(model_id: str) -> dict[str, Any]:
+        try:
+            model = registry.get(model_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Model is not loaded") from exc
+        model.clear_caches()
+        return {"id": model_id, "cleared": True, "cache": model.cache_info()}
+
+    @app.get("/v1/hardware", dependencies=[Depends(authorize)])
+    def hardware(refresh: bool = False) -> dict[str, Any]:
+        return profiler().profile(force=refresh).to_dict()
+
+    @app.get("/v1/cpu-plan", dependencies=[Depends(authorize)])
+    def cpu_plan(profile: str = "auto", reserve_cores: int = 1) -> dict[str, Any]:
+        try:
+            return plan_cpu_execution(profile, reserve_cores=reserve_cores).to_dict()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v1/runtime/config", dependencies=[Depends(authorize)])
+    def runtime_config() -> dict[str, Any]:
+        return {
+            "server": {"host": "127.0.0.1", "port": 11435, "max_models": registry.max_models},
+            "models": registry.configurations(),
+        }
+
+    @app.post("/v1/runtime/config/validate", dependencies=[Depends(authorize)])
+    def validate_runtime_config(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from .settings import RuntimeConfig
+
+            server = payload.get("server", {})
+            models_payload = payload.get("models", [])
+            if not isinstance(server, Mapping) or not isinstance(models_payload, list):
+                raise ValueError("server must be an object and models must be a list")
+            models: list[ModelConfig] = []
+            for item in models_payload:
+                if not isinstance(item, Mapping):
+                    raise ValueError("every model entry must be an object")
+                model_values = dict(item)
+                model_values.pop("resolved_backend", None)
+                models.append(ModelConfig(**model_values))
+            config = RuntimeConfig(
+                models=models,
+                host=str(server.get("host", "127.0.0.1")),
+                port=int(server.get("port", 11435)),
+                max_models=int(server.get("max_models", registry.max_models)),
+            )
+            return {
+                "valid": True,
+                "config": {
+                    "server": {"host": config.host, "port": config.port, "max_models": config.max_models},
+                    "models": [_model_config_values(item) for item in config.models],
+                },
+            }
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/v1/rag/collections", dependencies=[Depends(authorize)])
+    def rag_collections() -> dict[str, Any]:
+        return {"object": "list", "data": rag.list()}
+
+    @app.post("/v1/rag/collections", dependencies=[Depends(authorize)])
+    def create_rag_collection(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return rag.create(payload)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Model '{exc.args[0]}' is not loaded") from exc
+        except (FileNotFoundError, ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            status = 409 if "already exists" in str(exc) else 400
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    @app.get("/v1/rag/collections/{collection_id}", dependencies=[Depends(authorize)])
+    def rag_collection(collection_id: str) -> dict[str, Any]:
+        try:
+            return rag.describe(rag.get(collection_id, require_ready=False))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection does not exist") from exc
+
+    @app.delete("/v1/rag/collections/{collection_id}", dependencies=[Depends(authorize)])
+    def delete_rag_collection(collection_id: str) -> dict[str, Any]:
+        if not rag.delete(collection_id):
+            raise HTTPException(status_code=404, detail="RAG collection does not exist")
+        return {"id": collection_id, "deleted": True}
+
+    @app.post("/v1/rag/collections/{collection_id}/ingest", dependencies=[Depends(authorize)])
+    def ingest_rag_collection(collection_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        sources = payload.get("sources", payload.get("source"))
+        if isinstance(sources, list) and any(not isinstance(value, str) for value in sources):
+            raise HTTPException(status_code=422, detail="sources must be a string or a list of strings")
+        if not isinstance(sources, (str, list)) or not sources:
+            raise HTTPException(status_code=422, detail="sources is required")
+        metadata = payload.get("metadata")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise HTTPException(status_code=422, detail="metadata must be an object")
+        try:
+            collection = rag.get(collection_id)
+            namespace = _optional_text(payload.get("namespace"))
+            indexed = collection.pipeline.ingest(
+                sources,
+                metadata=metadata,
+                namespace=namespace,
+                batch_size=int(payload.get("batch_size", 32)),
+            )
+            return {
+                "id": collection_id,
+                "indexed": indexed,
+                "namespace": namespace or collection.pipeline.config.namespace,
+                "documents": collection.pipeline.count(namespace=namespace),
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection or model does not exist") from exc
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/rag/collections/{collection_id}/retrieve", dependencies=[Depends(authorize)])
+    def retrieve_rag_collection(collection_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            collection = rag.get(collection_id)
+            results = collection.pipeline.retrieve(
+                _required_text(payload.get("query", payload.get("question")), label="query"),
+                filters=_optional_mapping(payload.get("filters"), label="filters"),
+                namespace=_optional_text(payload.get("namespace")),
+                top_k=_optional_int(payload.get("top_k"), label="top_k"),
+            )
+            return {"id": collection_id, "data": [_search_result(item) for item in results], "cache": collection.pipeline.cache_info()}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection or model does not exist") from exc
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/rag/collections/{collection_id}/query", dependencies=[Depends(authorize)])
+    def query_rag_collection(collection_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            generation = _optional_mapping(payload.get("generation"), label="generation") or {}
+            collection = rag.get(collection_id)
+            answer = collection.pipeline.ask(
+                _required_text(payload.get("question", payload.get("query")), label="question"),
+                filters=_optional_mapping(payload.get("filters"), label="filters"),
+                namespace=_optional_text(payload.get("namespace")),
+                top_k=_optional_int(payload.get("top_k"), label="top_k"),
+                generation=generation,
+            )
+            return {"id": collection_id, **answer.to_dict(), "cache": collection.pipeline.cache_info()}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection or model does not exist") from exc
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/v1/rag/collections/{collection_id}/warm", dependencies=[Depends(authorize)])
+    def warm_rag_collection(collection_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        values = payload or {}
+        queries = values.get("queries", [])
+        if not isinstance(queries, list) or any(not isinstance(value, str) for value in queries):
+            raise HTTPException(status_code=422, detail="queries must be a list of strings")
+        try:
+            collection = rag.get(collection_id)
+            return {"id": collection_id, **collection.pipeline.warmup(queries)}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection or model does not exist") from exc
+        except (RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.delete("/v1/rag/collections/{collection_id}/namespaces/{namespace}", dependencies=[Depends(authorize)])
+    def clear_rag_namespace(collection_id: str, namespace: str) -> dict[str, Any]:
+        try:
+            collection = rag.get(collection_id)
+            deleted = collection.pipeline.clear(namespace=_required_text(namespace, label="namespace"))
+            return {"id": collection_id, "namespace": namespace, "deleted": deleted}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="RAG collection or model does not exist") from exc
+        except (RuntimeError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
@@ -297,6 +710,67 @@ def create_app(
     return app
 
 
+def _resource_id(value: Any, *, label: str) -> str:
+    identifier = _required_text(value, label=label)
+    if not _RESOURCE_ID.fullmatch(identifier):
+        raise ValueError(f"{label} must use 1-64 letters, numbers, dots, underscores, or hyphens")
+    return identifier
+
+
+def _required_id(value: Any, *, label: str) -> str:
+    return _required_text(value, label=label)
+
+
+def _required_text(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} is required")
+    return value.strip()
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("value must be a string")
+    return value.strip() or None
+
+
+def _optional_int(value: Any, *, label: str) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer") from exc
+
+
+def _optional_mapping(value: Any, *, label: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object")
+    return dict(value)
+
+
+def _embedding_signature(model: KernelLoomModel) -> str:
+    values = model.config.to_dict()
+    relevant = {key: values[key] for key in ("model_path", "backend", "device", "embedding")}
+    return json.dumps(relevant, sort_keys=True, separators=(",", ":"))
+
+
+def _model_config_values(config: ModelConfig) -> dict[str, Any]:
+    return {key: value for key, value in config.to_dict().items() if key != "resolved_backend"}
+
+
+def _search_result(result: Any) -> dict[str, Any]:
+    return {
+        "id": result.document.id,
+        "text": result.document.text,
+        "score": result.score,
+        "metadata": dict(result.document.metadata),
+    }
+
+
 def _selected_model(registry: ModelRegistry, payload: dict[str, Any], error: Any) -> KernelLoomModel:
     model_id = str(payload.get("model", "default"))
     try:
@@ -305,7 +779,7 @@ def _selected_model(registry: ModelRegistry, payload: dict[str, Any], error: Any
         raise error(status_code=404, detail=f"Model '{model_id}' is not loaded") from exc
 
 
-def _generation_settings(payload: dict[str, Any]) -> dict[str, Any]:
+def _generation_settings(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "max_new_tokens": payload.get("max_tokens"),
         "temperature": payload.get("temperature"),
@@ -352,10 +826,8 @@ def _chat_stream(
         metrics.finish(started)
 
 
-_CONSOLE_HTML = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KernelLoom</title><style>
-:root{color-scheme:dark;--bg:#0b0d10;--panel:#14181d;--line:#29313a;--text:#e9eef3;--muted:#8e9aa7;--accent:#65d1a7;--danger:#ff7c86}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#17342c 0,transparent 34%),var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}.shell{max-width:1100px;margin:auto;padding:48px 24px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:30px}.mark{width:38px;height:38px;border:2px solid var(--accent);border-radius:11px;transform:rotate(45deg);box-shadow:0 0 28px #65d1a744}.brand h1{font-size:24px;margin:0}.brand span{color:var(--muted)}.grid{display:grid;grid-template-columns:360px 1fr;gap:18px}.card{background:#14181de8;border:1px solid var(--line);border-radius:14px;padding:20px;box-shadow:0 18px 50px #0004}h2{font-size:14px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:0 0 18px}label{display:block;color:var(--muted);font-size:12px;margin:12px 0 5px}input,select,textarea,button{width:100%;border:1px solid var(--line);background:#0d1115;color:var(--text);border-radius:8px;padding:10px 11px;font:inherit}textarea{min-height:190px;resize:vertical}button{background:var(--accent);color:#07120e;border:0;font-weight:700;cursor:pointer;margin-top:14px}button.secondary{background:#212830;color:var(--text)}#answer{white-space:pre-wrap;min-height:220px;border:1px solid var(--line);border-radius:8px;padding:14px;background:#0d1115}.status{font-size:12px;color:var(--muted);margin-top:10px}.ok{color:var(--accent)}.error{color:var(--danger)}@media(max-width:760px){.grid{grid-template-columns:1fr}.shell{padding:24px 14px}}
-</style></head><body><main class="shell"><div class="brand"><div class="mark"></div><div><h1>KernelLoom</h1><span>Local model runtime</span></div></div><div class="grid"><section class="card"><h2>Load a model</h2><label>Model path</label><input id="path" placeholder="D:\models\model.gguf"><label>Model ID</label><input id="model" value="default"><label>Backend</label><select id="backend"><option value="auto">Auto</option><option value="llama-cpp">llama.cpp</option><option value="openvino">OpenVINO GenAI</option></select><label>Device</label><select id="device"><option>CPU</option><option>GPU</option><option>NPU</option></select><label>Context length</label><input id="context" type="number" value="4096"><label>API key (if configured)</label><input id="apiKey" type="password" autocomplete="off"><button onclick="loadModel()">Load model</button><div id="loadStatus" class="status">No model loaded in this session.</div></section><section class="card"><h2>Test response</h2><label>Prompt</label><textarea id="prompt" placeholder="Ask the loaded model something..."></textarea><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px"><div><label>Max tokens</label><input id="tokens" type="number" value="256"></div><div><label>Temperature</label><input id="temperature" type="number" step="0.1" value="0.7"></div></div><button onclick="sendPrompt()">Generate</button><label>Response</label><div id="answer">Ready.</div><div id="responseStatus" class="status"></div></section></div></main><script>
-const byId=id=>document.getElementById(id);const headers=()=>{const h={'Content-Type':'application/json'},k=byId('apiKey').value;if(k)h.Authorization=`Bearer ${k}`;return h};async function loadModel(){const status=byId('loadStatus');status.textContent='Loading…';status.className='status';try{const r=await fetch('/v1/models/load',{method:'POST',headers:headers(),body:JSON.stringify({model_path:byId('path').value,model_id:byId('model').value,backend:byId('backend').value,device:byId('device').value,context_length:Number(byId('context').value)})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Could not load model');status.textContent=`Loaded ${d.id} on ${d.device} with ${d.backend}`;status.className='status ok'}catch(e){status.textContent=e.message;status.className='status error'}}async function sendPrompt(){const answer=byId('answer'),status=byId('responseStatus');answer.textContent='Generating…';status.textContent='';const started=performance.now();try{const r=await fetch('/v1/chat/completions',{method:'POST',headers:headers(),body:JSON.stringify({model:byId('model').value,messages:[{role:'user',content:byId('prompt').value}],max_tokens:Number(byId('tokens').value),temperature:Number(byId('temperature').value)})});const d=await r.json();if(!r.ok)throw new Error(d.detail||'Generation failed');answer.textContent=d.choices[0].message.content;status.textContent=`${Math.round(performance.now()-started)} ms · ${d.kernelloom.backend} · ${d.kernelloom.device}`;status.className='status ok'}catch(e){answer.textContent=e.message;status.className='status error'}}
-</script></body></html>"""
+@lru_cache(maxsize=3)
+def _web_asset(name: str) -> str:
+    """Read packaged console assets without relying on a source checkout."""
+
+    return files("kernelloom").joinpath("web", name).read_text(encoding="utf-8")

@@ -142,3 +142,73 @@ def test_server_reuses_identical_warm_model_and_exposes_warmup() -> None:
         path.write_bytes(b"test")
         with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
             asyncio.run(exercise(path))
+
+
+def test_server_control_routes_and_rag_collections_keep_models_resident() -> None:
+    async def exercise(chat_path: Path, embed_path: Path) -> None:
+        app = create_app()
+        app.state.models.load({"model_path": str(chat_path), "model_id": "chat"})
+        app.state.models.load({"model_path": str(embed_path), "model_id": "embed", "embedding": True})
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            console = await client.get("/")
+            assert "/assets/console.js" in console.text
+            assert (await client.get("/assets/console.css")).status_code == 200
+
+            detail = await client.get("/v1/models/chat")
+            assert detail.status_code == 200
+            assert detail.json()["config"]["model_id"] == "chat"
+            assert "resolved_backend" not in detail.json()["config"]
+            assert (await client.post("/v1/models/chat/cache/clear", json={})).json()["cleared"] is True
+            assert (await client.get("/v1/cpu-plan?profile=latency&reserve_cores=1")).json()["profile"] == "latency"
+
+            exported = await client.get("/v1/runtime/config")
+            assert exported.status_code == 200
+            validated = await client.post("/v1/runtime/config/validate", json=exported.json())
+            assert validated.status_code == 200
+            assert validated.json()["valid"] is True
+
+            created = await client.post("/v1/rag/collections", json={
+                "id": "notes",
+                "model": "chat",
+                "embedding_model": "embed",
+                "database": "memory",
+                "config": {"chunk_size": 100, "chunk_overlap": 10, "retrieval": "similarity"},
+            })
+            assert created.status_code == 200
+            assert created.json()["ready"] is True
+            ingested = await client.post("/v1/rag/collections/notes/ingest", json={
+                "sources": "Python powers the local database service.",
+                "metadata": {"team": "platform"},
+            })
+            assert ingested.status_code == 200
+            assert ingested.json()["indexed"] == 1
+            retrieved = await client.post("/v1/rag/collections/notes/retrieve", json={
+                "query": "Which language powers the database?",
+                "filters": {"team": "platform"},
+            })
+            assert retrieved.status_code == 200
+            assert retrieved.json()["data"][0]["metadata"]["team"] == "platform"
+            answered = await client.post("/v1/rag/collections/notes/query", json={
+                "question": "Which language powers the database?",
+            })
+            assert answered.status_code == 200
+            assert answered.json()["sources"][0]["metadata"]["team"] == "platform"
+
+            blocked = await client.delete("/v1/models/chat")
+            assert blocked.status_code == 409
+            removed = await client.delete("/v1/rag/collections/notes")
+            assert removed.status_code == 200
+            assert app.state.models.get("chat").loaded is True
+            assert (await client.delete("/v1/models/chat")).status_code == 200
+        app.state.rag.close()
+        app.state.models.close()
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        chat_path = root / "chat.gguf"
+        embed_path = root / "embed.gguf"
+        chat_path.write_bytes(b"test")
+        embed_path.write_bytes(b"test")
+        with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
+            asyncio.run(exercise(chat_path, embed_path))

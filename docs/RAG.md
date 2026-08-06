@@ -1,9 +1,9 @@
 # Retrieval-augmented generation (RAG)
 
-KernelLoom includes a complete local RAG pipeline: load documents, split them,
-create embeddings, store vectors, retrieve relevant chunks, build a guarded
-context prompt, and generate a cited answer. The core pipeline has no mandatory
-database or orchestration dependency.
+KernelLoom includes local RAG components for loading documents, splitting them,
+creating embeddings, storing vectors, retrieving chunks, and building a context
+prompt for a chat model. The core pipeline has no mandatory database or
+orchestration dependency.
 
 ## Install and choose models
 
@@ -25,7 +25,7 @@ the RAG extra. Both dependencies stay local and are optional:
 pip install "kernelloom[rag]"
 ```
 
-## Five-minute persistent RAG
+## Persistent RAG example
 
 ```python
 from kernelloom import KernelLoomModel, ModelConfig, RAGConfig, RAGPipeline
@@ -73,11 +73,14 @@ try:
         print(source.score, source.document.metadata.get("source"))
 finally:
     rag.close()
+    chat.close()
+    embeddings.close()
 ```
 
 `RAGAnswer.to_dict()` produces a JSON-ready answer, query, source IDs, scores,
 and metadata. The generated prompt labels chunks as `[Source 1]`, `[Source 2]`,
-and so on so a capable chat model can cite them.
+and so on, but the model is free to ignore those labels. Use `result.sources`
+as the retrieval trace; do not treat text that looks like a citation as verified.
 
 ## Input varieties
 
@@ -132,9 +135,11 @@ store can interpret filters using its database's native filter language.
 
 ## Fast CPU embeddings and FAISS search
 
-The standard-library SQLite store is portable and persistent. For bigger local
-collections, use `FastEmbedEmbedder` (local ONNX Runtime models) and
-`FaissVectorStore` (native CPU similarity search):
+The standard-library SQLite store is portable and persistent. It evaluates the
+stored vectors in Python, so it fits modest local collections rather than a
+large-scale vector service. `FastEmbedEmbedder` (local ONNX Runtime models) and
+`FaissVectorStore` (native CPU exact similarity search) provide a faster local
+path when their optional dependencies are installed:
 
 ```python
 from kernelloom import FaissVectorStore, FastEmbedEmbedder, RAGConfig, RAGPipeline
@@ -156,11 +161,12 @@ print(rag.ask("How do I install this product?").answer)
 ```
 
 `RAGPipeline.local(..., database="faiss")` is a convenient alternative when
-using a KernelLoom GGUF embedding model. FAISS indexes are in-memory by design;
-persist source documents and rebuild at startup, or implement `VectorStore` for
-a persistent database. Use FAISS without metadata filters for the fastest path;
-when filters are supplied the adapter scans its namespace's candidates to keep
-filter results correct.
+using a KernelLoom GGUF embedding model. FAISS indexes are in-memory by design
+and use `IndexFlatIP` exact search with Python-resident document metadata.
+Persist source documents and rebuild at startup, or implement `VectorStore` for
+a persistent ANN database. Metadata filters scan a namespace's candidates to
+keep results correct, so an external database is a better fit for very large
+collections or complex filters.
 
 FastEmbed can download a selected model on first use. For strictly offline or
 air-gapped use, pre-populate its local model cache or use a GGUF embedding model
@@ -186,6 +192,34 @@ exact-query retrieval cache (defaults: 256 entries and 30 seconds). Ingestion
 and clearing a namespace invalidate it, so freshly indexed content is visible
 immediately. KernelLoom model embedding/token caches use separate compact,
 bounded LRU storage; see the [CPU-first guide](CPU_FIRST.md) for sizing.
+
+## Managed collections in the local server
+
+The browser control page and `/v1/rag/collections` routes build a pipeline from
+already-loaded server models. The server retains ownership of those models while
+the collection owns only its vector store. This means deleting a collection does
+not unload the chat or embedding model, and a referenced model cannot be
+replaced or unloaded until the collection is removed.
+
+Create a chat model and a separate model with `embedding=true`, then create a
+collection from the page at `/` or use the HTTP API:
+
+```bash
+curl -X POST http://127.0.0.1:11435/v1/rag/collections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"manuals",
+    "model":"chat",
+    "embedding_model":"embed",
+    "database":"memory",
+    "config":{"namespace":"manuals","retrieval":"mmr"}
+  }'
+```
+
+See [HTTP API and browser control](API_SERVER.md) for ingest, retrieve, query,
+warm, namespace-delete, and authentication examples. Server source paths are
+resolved on the host running KernelLoom, so keep the control API restricted to
+trusted users.
 
 ## Use a custom embedding provider
 
@@ -263,8 +297,8 @@ rag = RAGPipeline(
     loader=my_pdf_loader,
     splitter=my_token_aware_splitter,
     config=RAGConfig(prompt_template=(
-        "{system}\n\nVerified evidence:\n{context}\n\n"
-        "User question: {question}\nCited response:"
+        "{system}\n\nRetrieved context:\n{context}\n\n"
+        "User question: {question}\nResponse:"
     )),
 )
 ```
@@ -299,10 +333,11 @@ deleted = rag.clear(namespace="tenant-a")
 rag.close()
 ```
 
-`close()` closes the store, embedder, and generator when they expose a `close`
-method. `KernelLoomEmbedder` does not close a supplied embedding model unless it
-was created with `close_model=True`; `RAGPipeline.local()` therefore leaves that
-model's ownership with the application.
+`close()` clears the query cache and closes the vector store by default. The
+generator and embedder are caller-owned unless the pipeline was created with
+`close_generator=True` or `close_embedder=True`. This lets one resident model
+serve several pipelines safely. Close the `KernelLoomModel` objects yourself
+when the application stops.
 
 ## Production checklist
 

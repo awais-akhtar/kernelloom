@@ -6,9 +6,9 @@ cover individual integration and runtime surfaces in more detail.
 | Guide | Contents |
 | --- | --- |
 | [Getting started](GETTING_STARTED.md) | Model formats, installation, configuration, generation, streaming, CPU tuning and OpenVINO isolation. |
-| [HTTP API](API_SERVER.md) | Browser console, authentication, model lifecycle, chat, completions, SSE streaming and client examples. |
+| [HTTP API](API_SERVER.md) | Browser control, authentication, model lifecycle, hardware, chat, RAG collections, SSE streaming, and client examples. |
 | [LangChain](LANGCHAIN.md) | Chat model adapter, messages, prompt pipelines, streaming and lifecycle. |
-| [RAG pipeline](RAG.md) | End-to-end ingestion, local persistence, retrieval, citations, async usage, and custom database adapters. |
+| [RAG pipeline](RAG.md) | Ingestion, local persistence, retrieval traces, async usage, and custom database adapters. |
 | [CPU-first runtime](CPU_FIRST.md) | CPU execution profiles, warm models, bounded caches, hardware selection, and measurement. |
 | [Engine API](ENGINE_API.md) | Inspection, planning, direct inference, benchmarks, calibration, KV cache, scheduler and orchestration. |
 | [Architecture](ENGINE.md) | Frontends, compiler, hardware layer, native worker and persistence boundaries. |

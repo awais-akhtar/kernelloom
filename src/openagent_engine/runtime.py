@@ -9,6 +9,7 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from . import __version__
 from .models import AuditEvent, utc_now
 from .storage import EngineStore
 from .autotune import DeviceAutoTuner
@@ -206,7 +207,7 @@ class AdaptiveExecutionEngine:
             "project": project,
             "engine": "kernelloom",
             "runtime": "adaptive-compiler-runtime",
-            "version": "0.2.0",
+            "version": __version__,
             "hardware_profile": profile.to_dict(),
             "backends": [item.to_dict() for item in self.backends.capabilities(profile)],
             "inventory": dict(counts) if counts else {},

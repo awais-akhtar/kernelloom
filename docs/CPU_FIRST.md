@@ -1,15 +1,16 @@
 # CPU-first local inference
 
-KernelLoom is designed to make useful local AI possible on machines without a
-discrete GPU. The goal is not to promise a universal token rate—model size,
-quantization, RAM bandwidth, context length, and workload all matter—but to
-provide a safe, measurable starting point and keep repeated work off the CPU.
+KernelLoom provides CPU-oriented loading and execution settings for machines
+without a discrete GPU. Model size, quantization, RAM bandwidth, context length,
+and prompt shape all affect the result, so the runtime supplies a measurable
+starting point rather than a predicted token rate.
 
 ## The execution algorithm
 
 `plan_cpu_execution()` starts from the CPU cores available to the process. On
-Linux it respects process affinity/cgroup limits; elsewhere it uses the logical
-core count exposed by the operating system. It then applies one of four modes:
+Linux it respects a process affinity mask when one is available; elsewhere it
+uses the logical core count exposed by the operating system. It then applies one
+of four modes:
 
 | Profile | Core policy | Best for |
 | --- | --- | --- |
@@ -25,8 +26,8 @@ for profile in ("latency", "balanced", "throughput", "efficient"):
     print(plan_cpu_execution(profile).to_dict())
 ```
 
-The plan is an explainable starting point, not synthetic marketing. Benchmark
-the actual model and prompt distribution before committing capacity.
+The plan is an explainable starting point. Benchmark the actual model and prompt
+distribution before committing capacity.
 
 ## A fast CPU chat configuration
 
@@ -84,9 +85,10 @@ queries avoid native embedding work without a silent memory leak.
 ## Direct local hardware selection
 
 KernelLoom's OpenVINO worker owns native device handles through local inherited
-pipes—no TCP service, telemetry, or remote accelerator is involved. Use
-`device="AUTO"` to prefer a verified local GPU, then NPU, then CPU; use an
-explicit target when you need deterministic placement.
+pipes. It does not open a TCP service or send telemetry. Use `device="AUTO"` to
+follow the preference order of a discovered OpenVINO GPU, then NPU, then CPU;
+use an explicit target when you need deterministic placement. Discovery is not
+a calibration or a compatibility guarantee for a particular model.
 
 ```python
 from kernelloom import KernelLoomModel, ModelConfig
@@ -121,7 +123,7 @@ Measure cold and warm behavior separately. Keep the model loaded, call
 latency, and throughput for each target machine class rather than extrapolating
 from a single laptop.
 
-## What the current runtime guarantees
+## Current runtime behavior
 
 - GGUF models run through llama.cpp on CPU or supported GPU offload builds.
 - Exported OpenVINO GenAI models run through an isolated local CPU/GPU/NPU worker.

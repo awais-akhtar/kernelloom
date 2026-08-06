@@ -147,6 +147,35 @@ class RAGTests(unittest.TestCase):
         pipeline.retrieve("python database")
         self.assertEqual(embedder.calls, after_ingest + 3)
 
+    def test_close_keeps_caller_owned_models_open_by_default(self) -> None:
+        class ClosableGenerator(FakeGenerator):
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class ClosableEmbedder(KeywordEmbedder):
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        class ClosableStore(InMemoryVectorStore):
+            closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        generator = ClosableGenerator()
+        embedder = ClosableEmbedder()
+        store = ClosableStore()
+        pipeline = RAGPipeline(generator, embedder, store=store)
+        pipeline.close()
+
+        self.assertTrue(store.closed)
+        self.assertFalse(generator.closed)
+        self.assertFalse(embedder.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

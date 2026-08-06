@@ -69,7 +69,7 @@ class CountingLlama(FakeLlama):
 
 class KernelLoomTests(unittest.TestCase):
     def test_public_version_and_backend_detection(self) -> None:
-        self.assertEqual(__version__, "0.3.0")
+        self.assertEqual(__version__, "0.4.0")
         self.assertEqual(ModelConfig("model.gguf").resolved_backend, "llama-cpp")
         self.assertEqual(ModelConfig("openvino-model").resolved_backend, "openvino")
 

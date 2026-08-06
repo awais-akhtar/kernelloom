@@ -1,20 +1,20 @@
 # LangChain integration
 
-KernelLoom provides first-class local chat and embedding adapters. The goal is
-to let a LangChain application move from a hosted model to a resident GGUF model
-without losing the interfaces needed by real chains, agents, and RAG systems.
+KernelLoom provides local chat and embedding adapters for LangChain. They let an
+application use a resident GGUF model through the standard chat-model and
+embedding interfaces.
 
-## Five application problems KernelLoom handles
+## Supported LangChain surfaces
 
-1. **Blocking local runtimes** — native `ainvoke` and `astream` use KernelLoom's
-   async bridge instead of blocking the application event loop.
-2. **Agent compatibility** — `bind_tools` converts LangChain functions, tools,
+1. **Async local calls**: native `ainvoke` and `astream` use KernelLoom's async
+   bridge rather than blocking the application event loop.
+2. **Tool schemas**: `bind_tools` converts LangChain functions, tools,
    Pydantic models, and JSON schemas into llama.cpp tool definitions.
-3. **Unreliable parsing** — `with_structured_output` supports validated Pydantic
+3. **Structured output**: `with_structured_output` supports validated Pydantic
    results and dictionary schemas through the normal LangChain contract.
-4. **Local RAG plumbing** — `KernelLoomEmbeddings` batches documents through a
+4. **Local embeddings**: `KernelLoomEmbeddings` batches documents through a
    dedicated local sequence-embedding GGUF model.
-5. **Missing operational data** — responses expose standard token usage plus
+5. **Response metadata**: responses expose standard token usage plus
    backend, device, model ID, finish reason, and measured latency metadata.
 
 ## Install
@@ -88,8 +88,8 @@ to one resident model are serialized to protect its native context.
 ## Tool calling and agents
 
 Use an instruct GGUF model with a tool-capable chat template. Tool support is a
-property of the model and template; KernelLoom does not pretend an incompatible
-model can call tools reliably.
+property of the model and template; an incompatible model may not produce a
+reliable tool call.
 
 ```python
 from langchain_core.tools import tool

@@ -68,6 +68,7 @@ generation requests are not automatically replayed after worker failure.
 | Variable | Purpose |
 | --- | --- |
 | `KERNELLOOM_API_KEY` | Require bearer authentication on `/v1` routes. |
+| `KERNELLOOM_DATA_DIR` | Runtime directory used by server-side hardware discovery when no model-specific directory is selected. |
 | `KERNELLOOM_ACCELERATOR_PYTHON` | Python interpreter used for the isolated OpenVINO worker. |
 | `KERNELLOOM_SOURCE_ROOT` | Explicit source root made available to the worker. |
 | `KERNELLOOM_LLAMA_SERVER` | Optional llama.cpp server executable used during hardware discovery. |
@@ -103,7 +104,7 @@ lifespan handler.
 ## Build a package locally
 
 ```bash
-python -m pip install -e ".[dev,langchain,server]"
+python -m pip install -e ".[dev,langchain,server,rag]"
 python -m pytest
 python -m build
 python -m twine check dist/*
@@ -113,24 +114,28 @@ The expected artifacts are a universal wheel and a source distribution.
 
 ## Automatic PyPI publishing
 
-The repository workflow at `.github/workflows/publish.yml` runs on every push
-to `main` and can also be started manually.
+The repository workflow at `.github/workflows/publish.yml` is configured to run
+on pushes to `main` and can also be started manually. A publish still depends on
+the GitHub environment, the PyPI token, successful verification, and PyPI.
 
 Configure a GitHub repository secret named `PYPI_API_TOKEN` containing a PyPI
 project or account token. The workflow:
 
 1. checks out the pushed commit;
-2. installs development, server and LangChain dependencies;
-3. runs the complete test suite;
+2. runs the full test suite on Python 3.11, 3.12, and 3.13;
+3. installs the server, LangChain, FastEmbed, and FAISS extras on the package
+   build runner and runs the tests again;
 4. derives a unique post-release version from the GitHub run number;
 5. builds the wheel and source distribution;
 6. validates both artifacts with Twine;
-7. publishes the artifacts to PyPI.
+7. publishes the artifacts to PyPI after the verification and build jobs pass.
 
-For example, base version `0.3.0` and workflow run `12` produce
-`0.3.0.post12`. PyPI files are immutable, so the unique post-release prevents a
-later push from attempting to overwrite an earlier artifact. Standard
-`pip install kernelloom` considers post-releases newer than their base release.
+For example, base version `0.4.0` and workflow run `12` produce
+`0.4.0.post12`. PyPI files are immutable, so the unique post-release prevents a
+later push from attempting to overwrite an earlier artifact. A re-run of the
+same workflow uses the same version and safely skips files PyPI already has.
+Standard `pip install kernelloom` considers post-releases newer than their base
+release.
 
 When beginning a new release line, update `project.version` in
 `pyproject.toml`. The package reads its installed version from distribution

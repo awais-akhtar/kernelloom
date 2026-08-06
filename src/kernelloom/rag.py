@@ -374,13 +374,27 @@ class RAGPipeline:
         config: RAGConfig | None = None,
         loader: DocumentLoader | None = None,
         splitter: Any | None = None,
+        close_store: bool = True,
+        close_embedder: bool = False,
+        close_generator: bool = False,
     ) -> None:
+        """Create a RAG pipeline around caller-owned model objects.
+
+        The pipeline owns its vector store by default, but it deliberately does
+        not close the supplied generator or embedder.  Those objects are often
+        shared resident models managed by an application or server.  Set the
+        corresponding ``close_*`` flag only when this pipeline is their owner.
+        """
+
         self.generator = generator
         self.embedder = embedder
         self.store = store or InMemoryVectorStore()
         self.config = config or RAGConfig()
         self.loader = loader or DocumentLoader()
         self.splitter = splitter or TextSplitter(self.config.chunk_size, self.config.chunk_overlap)
+        self.close_store = close_store
+        self.close_embedder = close_embedder
+        self.close_generator = close_generator
         self._query_cache: OrderedDict[str, tuple[float, tuple[SearchResult, ...]]] = OrderedDict()
         self._cache_lock = threading.RLock()
         self._query_cache_hits = 0
@@ -541,7 +555,14 @@ class RAGPipeline:
     def close(self) -> None:
         self._clear_query_cache()
         seen: set[int] = set()
-        for component in (self.store, self.embedder, self.generator):
+        components = (
+            (self.store, self.close_store),
+            (self.embedder, self.close_embedder),
+            (self.generator, self.close_generator),
+        )
+        for component, should_close in components:
+            if not should_close:
+                continue
             if id(component) in seen:
                 continue
             seen.add(id(component))

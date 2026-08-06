@@ -1,247 +1,214 @@
-# HTTP API and browser console
+# HTTP API and browser control
 
-KernelLoom can keep named models resident behind a local FastAPI service. The
-service provides a browser console, model lifecycle routes, OpenAI-compatible
-chat completions, text completions and chat streaming.
+KernelLoom keeps named models resident in a FastAPI process. The service offers
+an OpenAI-style subset for chat, text completion, embeddings, and chat
+streaming. It also exposes local control routes for models, hardware, CPU plans,
+runtime configuration, and RAG collections. It is not a full OpenAI API
+implementation.
 
-## Install and start
+## Start the service
 
-Install the server plus a model runtime:
+Install the server and one model runtime:
 
 ```bash
 pip install "kernelloom[server,llama]"
+kernelloom serve --host 127.0.0.1 --port 11435
 ```
 
-Start on the loopback interface:
+Default addresses:
 
-```bash
-kernelloom serve
-```
+- Browser control: `http://127.0.0.1:11435/`
+- API base: `http://127.0.0.1:11435/v1`
+- Interactive schema: `http://127.0.0.1:11435/docs`
+- Metrics: `http://127.0.0.1:11435/metrics`
 
-The defaults are:
-
-- Host: `127.0.0.1`
-- Port: `11435`
-- Browser console: `http://127.0.0.1:11435/`
-- API base URL: `http://127.0.0.1:11435/v1`
-- Interactive API schema: `http://127.0.0.1:11435/docs`
-
-Choose another port when required:
-
-```bash
-kernelloom serve --host 127.0.0.1 --port 8080
-```
-
-For a reproducible multi-model service, create `kernelloom.json`:
+For reproducible startup, create `kernelloom.json`:
 
 ```json
 {
   "server": {"host": "127.0.0.1", "port": 11435, "max_models": 2},
   "models": [
-    {"model_path": "./models/chat.gguf", "model_id": "chat", "threads": 8},
-    {"model_path": "./models/code.gguf", "model_id": "code", "threads": 8}
+    {
+      "model_path": "./models/chat.gguf",
+      "model_id": "chat",
+      "cpu_profile": "latency",
+      "warmup": true
+    },
+    {
+      "model_path": "./models/embed.gguf",
+      "model_id": "embed",
+      "embedding": true
+    }
   ]
 }
 ```
 
-Relative model paths are resolved beside the configuration file. Start it with
-`kernelloom serve --config kernelloom.json`.
-
-## Preload a model
-
-Load a model during server startup:
-
 ```bash
-kernelloom serve \
-  --model-path ./models/model.gguf \
-  --model-id assistant \
-  --backend auto \
-  --device CPU
+kernelloom serve --config kernelloom.json
 ```
 
-If loading fails, startup fails instead of accepting requests without the
-requested model.
+Relative paths are resolved beside the JSON file. If a configured model cannot
+load, startup fails before the server accepts requests.
 
-## Browser console
+## Browser control
 
-Open the service root in a browser. The console provides fields for:
+The page at `/` is a dependency-free client for the same `/v1` routes. It can:
 
-- model path;
-- model ID;
-- backend;
-- device;
-- context length;
-- optional API key;
-- prompt, response limit and temperature.
+- edit every `ModelConfig` setting, including CPU threads, memory mapping,
+  GPU layers, cache limits, generation defaults, OpenVINO device JSON, and
+  scheduler JSON;
+- load or replace a model, reuse an identical resident configuration, warm it,
+  clear caches, or unload it;
+- inspect local hardware and copy a CPU plan into the model form;
+- stream a chat response from a selected model; and
+- create memory, SQLite, or optional FAISS RAG collections from loaded chat and
+  embedding models.
 
-The console operates on the same API routes documented below. Loaded models
-remain resident until replaced, unloaded, or the server stops.
+It can also download the resident-model configuration as `kernelloom.json`.
+The page does not browse the server filesystem and does not save settings by
+itself. Paths are supplied as text and resolved on the server machine.
 
-## Authentication
+## Authentication and network exposure
 
-The service has no authentication when `KERNELLOOM_API_KEY` is unset. This is
-appropriate only for a loopback-only development service.
-
-Set a key before binding to a network interface:
+Set `KERNELLOOM_API_KEY` to require a bearer token on every `/v1` route:
 
 ```powershell
 $env:KERNELLOOM_API_KEY = "replace-with-a-long-random-value"
 kernelloom serve --host 0.0.0.0
 ```
 
-Send the key as a bearer token:
-
 ```bash
 curl http://127.0.0.1:11435/v1/models \
   -H "Authorization: Bearer replace-with-a-long-random-value"
 ```
 
-All `/v1` routes require the token when configured. `/health`, `/` and the API
-schema remain available. Put TLS and stronger access controls in front of the
-service before using it across an untrusted network.
+`/`, `/assets/console.css`, `/assets/console.js`, `/health`, `/ready`, and
+`/metrics` remain unauthenticated so a local browser and process checks can
+reach them. Put TLS, firewall rules, rate limits, and stronger identity controls
+in front of a network-facing service. Do not let untrusted users call model-load
+or RAG-ingestion routes: both accept server-local paths.
 
-## Routes
+## Route map
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `GET` | `/health` | Process health and number of loaded models. |
-| `GET` | `/ready` | Readiness, resident model IDs and configured capacity. |
-| `GET` | `/metrics` | Dependency-free Prometheus text metrics. |
+| `GET` | `/health` | Lightweight process health and model count. |
+| `GET` | `/ready` | Resident model IDs and configured capacity. |
+| `GET` | `/metrics` | Prometheus-style request and resident-model metrics. |
 | `GET` | `/v1/models` | List resident models. |
-| `POST` | `/v1/models/load` | Load or replace a named model. |
-| `POST` | `/v1/models/{model_id}/warm` | Run bounded local warmup work without replacing a resident model. |
-| `DELETE` | `/v1/models/{model_id}` | Unload a resident model. |
-| `POST` | `/v1/chat/completions` | Chat completion, with optional SSE streaming. |
+| `GET` | `/v1/models/{id}` | Model status plus reusable configuration. |
+| `POST` | `/v1/models/load` | Load, reuse, or replace a named model. |
+| `DELETE` | `/v1/models/{id}` | Unload a model not used by a RAG collection. |
+| `POST` | `/v1/models/{id}/warm` | Run bounded local warmup. |
+| `POST` | `/v1/models/{id}/cache/clear` | Clear caches without unloading. |
+| `GET` | `/v1/hardware` | Local CPU, GPU, NPU, and runtime profile. |
+| `GET` | `/v1/cpu-plan` | CPU profile recommendation. |
+| `GET` | `/v1/runtime/config` | Export resident model settings. |
+| `POST` | `/v1/runtime/config/validate` | Validate a runtime configuration object. |
+| `POST` | `/v1/chat/completions` | OpenAI-style chat completion with optional SSE streaming. |
 | `POST` | `/v1/completions` | Plain text completion. |
-| `POST` | `/v1/embeddings` | Batch embeddings from a resident local GGUF embedding model. |
+| `POST` | `/v1/embeddings` | Embeddings from a model configured with `embedding=true`. |
+| `GET`, `POST` | `/v1/rag/collections` | List or create managed RAG collections. |
+| `GET`, `DELETE` | `/v1/rag/collections/{id}` | Inspect or remove a collection. |
+| `POST` | `/v1/rag/collections/{id}/ingest` | Load, split, embed, and upsert local content. |
+| `POST` | `/v1/rag/collections/{id}/retrieve` | Return retrieved chunks and scores. |
+| `POST` | `/v1/rag/collections/{id}/query` | Retrieve context and run the chat model. |
+| `POST` | `/v1/rag/collections/{id}/warm` | Warm model, embedder, store, and optional queries. |
+| `DELETE` | `/v1/rag/collections/{id}/namespaces/{namespace}` | Delete one collection namespace. |
 
-## Load a model
+## Model lifecycle
+
+Load a GGUF model:
 
 ```bash
 curl http://127.0.0.1:11435/v1/models/load \
   -H "Content-Type: application/json" \
   -d '{
-    "model_path":"./models/model.gguf",
-    "model_id":"assistant",
+    "model_path":"./models/chat.gguf",
+    "model_id":"chat",
     "backend":"auto",
-    "device":"CPU",
-    "context_length":4096,
-    "batch_size":512,
-    "micro_batch_size":128,
-    "threads":8,
-    "batch_threads":8,
-    "gpu_layers":0,
-    "use_mmap":true,
-    "flash_attention":false,
-    "system_prompt":"Answer clearly and briefly."
+    "cpu_profile":"latency",
+    "reserve_cores":1,
+    "auto_batch_size":true,
+    "warmup":true
   }'
 ```
 
-The body accepts the fields defined by `ModelConfig`. Loading another model
-with the same `model_id` replaces and closes the previous instance. Loading the
-same normalized configuration reuses the existing warm model instead. Set
-`"warmup": true` in the load body or configuration file to warm it during load.
+For llama.cpp, `gpu_layers` determines GPU offload when the installed build
+supports it. The `device` field selects an OpenVINO target for OpenVINO models.
+`device="AUTO"` follows the discovered OpenVINO device preference order; it is
+not a benchmark or compatibility guarantee.
 
-Warm an existing model explicitly:
+An identical load request reuses the current native context. A changed request
+replaces a named model only after the replacement loads successfully. A model
+referenced by a managed RAG collection cannot be replaced or unloaded until the
+collection is removed. This avoids changing an embedding model beneath an index.
 
 ```bash
-curl http://127.0.0.1:11435/v1/models/assistant/warm \
+curl -X POST http://127.0.0.1:11435/v1/models/chat/warm \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Warm the local assistant.","iterations":1,"max_tokens":1}'
+
+curl -X POST http://127.0.0.1:11435/v1/models/chat/cache/clear
 ```
 
-For an embedding model, the route warms the native embedding path rather than
-generation. It returns measured warmup latency and keeps the model resident.
-
-An OpenVINO example:
+## Hardware and CPU plans
 
 ```bash
-curl http://127.0.0.1:11435/v1/models/load \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_path":"./models/model-openvino",
-    "model_id":"openvino-chat",
-    "backend":"openvino",
-    "device":"GPU"
-  }'
+curl "http://127.0.0.1:11435/v1/cpu-plan?profile=throughput&reserve_cores=1"
+curl "http://127.0.0.1:11435/v1/hardware?refresh=true"
 ```
 
-## List and unload models
+The CPU plan contains thread and batch starting values. It uses process-visible
+cores, including a Linux affinity mask when available, but it does not measure
+token throughput. The hardware route reports devices exposed by the local system
+and installed runtimes; test the target model before treating a listed device as
+an execution guarantee.
 
-```bash
-curl http://127.0.0.1:11435/v1/models
-curl -X DELETE http://127.0.0.1:11435/v1/models/assistant
-```
-
-## Chat completion
+## Chat, completion, and streaming
 
 ```bash
 curl http://127.0.0.1:11435/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"assistant",
-    "messages":[
-      {"role":"system","content":"You explain software architecture."},
-      {"role":"user","content":"What is an isolated worker?"}
-    ],
-    "max_tokens":256,
-    "temperature":0.2,
-    "top_p":0.9,
-    "top_k":50,
-    "repetition_penalty":1.05,
-    "stop":["END"]
+    "model":"chat",
+    "messages":[{"role":"user","content":"Explain paged KV caches."}],
+    "max_tokens":128,
+    "temperature":0.2
   }'
 ```
 
-The response follows the familiar `chat.completion` shape. KernelLoom also
-adds a `kernelloom` object containing the backend, device and measured request
-latency.
+The implemented message fields are `role`, `content`, `name`, `tool_call_id`,
+and `tool_calls`. Generation settings include `max_tokens`, `temperature`,
+`top_p`, `top_k`, `repetition_penalty`, and `stop`. Backend support for tools
+and response formats depends on the model and runtime; the HTTP layer does not
+add a complete OpenAI tools or responses API.
 
-## Chat streaming
-
-Set `stream` to `true`:
+Set `stream` to `true` for server-sent events:
 
 ```bash
 curl -N http://127.0.0.1:11435/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model":"assistant",
-    "messages":[{"role":"user","content":"Explain paged KV caches."}],
-    "stream":true,
-    "max_tokens":256
+    "model":"chat",
+    "messages":[{"role":"user","content":"Give three cache tips."}],
+    "max_tokens":128,
+    "stream":true
   }'
 ```
 
-The response uses server-sent events. Each event contains a
-`chat.completion.chunk`, followed by `data: [DONE]`.
-
-## Text completion
+The service emits `chat.completion.chunk` data events and ends with `[DONE]`.
+Text completion is non-streaming:
 
 ```bash
 curl http://127.0.0.1:11435/v1/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model":"assistant",
-    "prompt":"Complete this sentence: local inference is",
-    "max_tokens":80,
-    "temperature":0.3
-  }'
+  -d '{"model":"chat","prompt":"Complete: local inference is","max_tokens":64}'
 ```
-
-Text completion currently returns a complete response rather than an event
-stream. Use chat completions when streaming is required.
 
 ## Embeddings
 
-Load a dedicated sequence-embedding GGUF with embedding mode enabled:
-
-```bash
-curl http://127.0.0.1:11435/v1/models/load \
-  -H "Content-Type: application/json" \
-  -d '{"model_path":"./models/nomic-embed-text.gguf","model_id":"embed","embedding":true}'
-```
-
-Embed one string or a batch:
+Load an embedding GGUF model with `embedding=true`, then request vectors:
 
 ```bash
 curl http://127.0.0.1:11435/v1/embeddings \
@@ -249,85 +216,112 @@ curl http://127.0.0.1:11435/v1/embeddings \
   -d '{"model":"embed","input":["first document","second document"]}'
 ```
 
-The model must produce one sequence-level vector per input. KernelLoom rejects
-token-level matrices rather than silently returning a shape most vector stores
-cannot use.
+The endpoint uses the model's local embedding path and returns vectors in
+OpenAI-style `data` entries. It rejects a model not configured for embeddings.
 
-## Python requests client
+## Managed RAG collections
 
-```python
-import requests
-
-base_url = "http://127.0.0.1:11435"
-headers = {"Authorization": "Bearer replace-with-a-long-random-value"}
-
-response = requests.post(
-    f"{base_url}/v1/chat/completions",
-    headers=headers,
-    json={
-        "model": "assistant",
-        "messages": [{"role": "user", "content": "Hello"}],
-        "max_tokens": 128,
-    },
-    timeout=120,
-)
-response.raise_for_status()
-print(response.json()["choices"][0]["message"]["content"])
-```
-
-## OpenAI Python client
-
-Install the OpenAI client separately:
+Create a collection from two resident models:
 
 ```bash
-pip install openai
+curl -X POST http://127.0.0.1:11435/v1/rag/collections \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id":"manuals",
+    "model":"chat",
+    "embedding_model":"embed",
+    "database":"./data/manuals.db",
+    "config":{
+      "namespace":"product",
+      "chunk_size":900,
+      "chunk_overlap":120,
+      "retrieval":"mmr",
+      "top_k":4,
+      "fetch_k":12
+    }
+  }'
 ```
+
+`database` accepts `memory`, `faiss`, or a SQLite path. `faiss` creates an
+in-memory exact-search index and requires `pip install "kernelloom[faiss]"`.
+SQLite is persistent but scores stored vectors in Python, so it is a practical
+local store rather than a high-scale ANN database.
+
+Ingest a server-local directory, supported text file, or inline text:
+
+```bash
+curl -X POST http://127.0.0.1:11435/v1/rag/collections/manuals/ingest \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sources":"./knowledge/manuals",
+    "metadata":{"product":"kernelloom"},
+    "namespace":"product",
+    "batch_size":32
+  }'
+```
+
+Retrieve without generation:
+
+```bash
+curl -X POST http://127.0.0.1:11435/v1/rag/collections/manuals/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query":"How do I configure CPU threads?","filters":{"product":"kernelloom"}}'
+```
+
+Ask a question with a retrieval trace:
+
+```bash
+curl -X POST http://127.0.0.1:11435/v1/rag/collections/manuals/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question":"How do I configure CPU threads?",
+    "generation":{"max_new_tokens":180,"temperature":0.2}
+  }'
+```
+
+The response contains the answer and `sources` with document IDs, scores, and
+metadata. Source labels in generated text are not verified citations. See
+[RAG.md](RAG.md) for store characteristics and custom database adapters.
+
+## OpenAI Python client
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:11435/v1",
-    api_key="replace-with-a-long-random-value",
-)
-
+client = OpenAI(base_url="http://127.0.0.1:11435/v1", api_key="local")
 response = client.chat.completions.create(
-    model="assistant",
-    messages=[{"role": "user", "content": "Describe tensor parallelism."}],
-    max_tokens=200,
+    model="chat",
+    messages=[{"role": "user", "content": "What is a KV cache?"}],
 )
 print(response.choices[0].message.content)
 ```
 
-If authentication is disabled, the client still requires a non-empty local
-placeholder for its `api_key` argument.
+When server authentication is enabled, pass the configured bearer token as
+`api_key`.
 
-## Application factory
+## Runtime configuration export and validation
 
-Embed the FastAPI application in another Python process:
+`GET /v1/runtime/config` returns the resident-model portion of a portable
+`kernelloom.json` file. It does not know the host and port that launched the
+process, so it uses the standard loopback defaults. Adjust those values before
+using it for another deployment.
 
-```python
-from kernelloom import ModelConfig
-from kernelloom.server import create_app
-
-app = create_app(initial_model=ModelConfig(
-    "./models/model.gguf",
-    model_id="assistant",
-))
+```bash
+curl -X POST http://127.0.0.1:11435/v1/runtime/config/validate \
+  -H "Content-Type: application/json" \
+  --data-binary @kernelloom.json
 ```
 
-Run it with any ASGI server that supports FastAPI lifespan events. The lifespan
-handler loads the initial model and closes all resident models on shutdown.
+## Errors and monitoring
 
-## Operational notes
+- `400` means an invalid configuration, missing optional dependency, source
+  load issue, or runtime failure.
+- `401` means the bearer token is missing or wrong.
+- `404` means a named model or RAG collection is not resident.
+- `409` means a RAG collection is using the model, so it cannot be replaced or
+  unloaded yet.
+- `422` means an API payload has the wrong basic shape.
 
-- A model ID must be loaded before it can answer completion requests.
-- One model instance serializes its backend calls for predictable native access.
-- Loading multiple models increases memory use; the service does not overcommit deliberately.
-- The resident-model limit defaults to four. Set `--max-models`, the JSON `max_models`, or `KERNELLOOM_MAX_MODELS`.
-- `/metrics` reports request, active, completed, failed and total generation-time counters.
-- Model paths are local filesystem paths on the server machine.
-- Do not expose model-loading routes to untrusted users.
-- HTTP status `400` indicates model configuration or loading failure.
-- HTTP status `404` indicates an unknown model ID.
-- HTTP status `401` indicates an invalid or missing configured bearer token.
+`/metrics` reports request count, active requests, completed requests, failed
+requests, total generation time, resident model count, and active RAG collection
+count. It does not publish prompt text or cached embeddings.

@@ -39,5 +39,5 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: python -m pip install -e ".[dev,langchain,server]"
+      - run: python -m pip install -e ".[dev,langchain,server,rag]"
       - run: python -m pytest tests/test_integrations.py

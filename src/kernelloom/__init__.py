@@ -23,7 +23,7 @@ from .rag import (
 )
 from .settings import RuntimeConfig, load_runtime_config
 
-_SOURCE_VERSION = "0.3.0"
+_SOURCE_VERSION = "0.4.0"
 try:
     _installed_version = version("kernelloom")
     __version__ = (
