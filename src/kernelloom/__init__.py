@@ -6,6 +6,18 @@ from typing import Any
 
 from .config import ModelConfig
 from .model import GenerationResult, KernelLoomModel
+from .rag import (
+    Document,
+    DocumentLoader,
+    InMemoryVectorStore,
+    KernelLoomEmbedder,
+    RAGAnswer,
+    RAGConfig,
+    RAGPipeline,
+    SQLiteVectorStore,
+    SearchResult,
+    TextSplitter,
+)
 from .settings import RuntimeConfig, load_runtime_config
 
 _SOURCE_VERSION = "0.3.0"
@@ -34,6 +46,16 @@ __all__ = [
     "GenerationResult",
     "KernelLoomModel",
     "ModelConfig",
+    "Document",
+    "DocumentLoader",
+    "InMemoryVectorStore",
+    "KernelLoomEmbedder",
+    "RAGAnswer",
+    "RAGConfig",
+    "RAGPipeline",
+    "SQLiteVectorStore",
+    "SearchResult",
+    "TextSplitter",
     "RuntimeConfig",
     "load_runtime_config",
     *_ENGINE_EXPORTS,

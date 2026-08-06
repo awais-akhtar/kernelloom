@@ -20,10 +20,32 @@ class FakeLlama:
                 {"choices": [{"delta": {"content": "local "}}]},
                 {"choices": [{"delta": {"content": "answer"}}]},
             ])
+        message = {"content": "local answer"}
+        if settings.get("tools"):
+            function = settings["tools"][0]["function"]
+            message = {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-local-1",
+                    "type": "function",
+                    "function": {"name": function["name"], "arguments": '{"city":"London"}'},
+                }],
+            }
         return {
-            "choices": [{"message": {"content": "local answer"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            "choices": [{"message": message, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
         }
+
+    def create_embedding(self, *, input):
+        return {
+            "data": [
+                {"index": index, "embedding": [float(len(text)), float(index + 1)]}
+                for index, text in enumerate(input)
+            ]
+        }
+
+    def tokenize(self, value, *, add_bos):
+        return value.split()
 
 
 class KernelLoomTests(unittest.TestCase):
@@ -79,6 +101,20 @@ class KernelLoomTests(unittest.TestCase):
                 self.assertEqual(model._backend.options["n_threads_batch"], 3)
                 self.assertTrue(model._backend.options["flash_attn"])
                 self.assertTrue(model._backend.options["use_mlock"])
+                model.close()
+
+    def test_local_embedding_batch_and_async_api(self) -> None:
+        import asyncio
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "embed.gguf"
+            path.write_bytes(b"test")
+            with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
+                model = KernelLoomModel(ModelConfig(str(path), embedding=True))
+                self.assertEqual(model.embed("hello"), [5.0, 1.0])
+                self.assertEqual(model.embed_many(["a", "abcd"]), [[1.0, 1.0], [4.0, 2.0]])
+                self.assertEqual(asyncio.run(model.aembed("async")), [5.0, 1.0])
+                self.assertEqual(model.count_tokens("one two three"), 3)
                 model.close()
 
     def test_system_prompt_is_added_once(self) -> None:

@@ -13,7 +13,7 @@ from typing import Any, AsyncIterator, Iterator, Mapping, Sequence
 from .config import ModelConfig
 
 
-Message = Mapping[str, str]
+Message = Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +147,49 @@ class KernelLoomModel:
     def chat(self, messages: Sequence[Message], **generation: Any) -> GenerationResult:
         return self.generate(messages, **generation)
 
+    def embed(self, text: str) -> list[float]:
+        """Embed one text with a local GGUF embedding model."""
+
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts: Sequence[str]) -> list[list[float]]:
+        """Embed several texts in one backend call."""
+
+        if not texts or any(not isinstance(text, str) or not text.strip() for text in texts):
+            raise ValueError("texts must contain at least one non-empty string")
+        with self._lock:
+            self.load()
+            if self.config.resolved_backend != "llama-cpp":
+                raise NotImplementedError("High-level embeddings currently require a GGUF embedding model")
+            if not self.config.embedding:
+                raise RuntimeError("Load the model with embedding=True before requesting embeddings")
+            response = self._backend.create_embedding(input=list(texts))
+            rows = sorted(response.get("data", []), key=lambda item: int(item.get("index", 0)))
+            vectors = [item.get("embedding") for item in rows]
+            if len(vectors) != len(texts) or any(not _flat_vector(vector) for vector in vectors):
+                raise RuntimeError("The model did not return one sequence-level embedding per input")
+            return [[float(value) for value in vector] for vector in vectors]
+
+    async def aembed(self, text: str) -> list[float]:
+        return await asyncio.to_thread(self.embed, text)
+
+    async def aembed_many(self, texts: Sequence[str]) -> list[list[float]]:
+        return await asyncio.to_thread(self.embed_many, texts)
+
+    def count_tokens(self, text: str) -> int:
+        """Count tokens with the loaded local GGUF tokenizer."""
+
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        with self._lock:
+            self.load()
+            if self.config.resolved_backend != "llama-cpp":
+                raise NotImplementedError("High-level token counting currently requires a GGUF model")
+            return len(self._backend.tokenize(text.encode("utf-8"), add_bos=False))
+
+    async def acount_tokens(self, text: str) -> int:
+        return await asyncio.to_thread(self.count_tokens, text)
+
     def generate(
         self,
         value: str | Sequence[Message],
@@ -158,6 +201,11 @@ class KernelLoomModel:
             settings = self.config.generation(**generation)
             started = time.perf_counter()
             if self.config.resolved_backend == "llama-cpp":
+                backend_options = {
+                    key: settings[key]
+                    for key in ("tools", "tool_choice", "response_format")
+                    if settings.get(key) is not None
+                }
                 response = self._backend.create_chat_completion(
                     messages=messages,
                     max_tokens=int(settings["max_new_tokens"]),
@@ -166,10 +214,16 @@ class KernelLoomModel:
                     top_k=int(settings["top_k"]),
                     repeat_penalty=float(settings["repetition_penalty"]),
                     stop=settings.get("stop_strings"),
+                    **backend_options,
                 )
                 choice = response["choices"][0]
-                text = str(choice.get("message", {}).get("content", ""))
-                metadata = {"usage": response.get("usage", {}), "finish_reason": choice.get("finish_reason")}
+                message = choice.get("message", {})
+                text = str(message.get("content") or "")
+                metadata = {
+                    "usage": response.get("usage", {}),
+                    "finish_reason": choice.get("finish_reason"),
+                    "tool_calls": message.get("tool_calls", []),
+                }
                 device = "GPU" if self.config.gpu_layers else "CPU"
             else:
                 response = self._engine.generate_direct(
@@ -198,6 +252,11 @@ class KernelLoomModel:
             messages = self._messages(value)
             settings = self.config.generation(**generation)
             if self.config.resolved_backend == "llama-cpp":
+                backend_options = {
+                    key: settings[key]
+                    for key in ("tools", "tool_choice", "response_format")
+                    if settings.get(key) is not None
+                }
                 chunks = self._backend.create_chat_completion(
                     messages=messages,
                     max_tokens=int(settings["max_new_tokens"]),
@@ -207,6 +266,7 @@ class KernelLoomModel:
                     repeat_penalty=float(settings["repetition_penalty"]),
                     stop=settings.get("stop_strings"),
                     stream=True,
+                    **backend_options,
                 )
                 for chunk in chunks:
                     text = str(chunk["choices"][0].get("delta", {}).get("content", ""))
@@ -229,6 +289,7 @@ class KernelLoomModel:
             "device": self.config.device,
             "loaded": self.loaded,
             "load": dict(self._load_info),
+            "embedding": self.config.embedding,
         }
 
     def close(self) -> None:
@@ -275,6 +336,7 @@ class KernelLoomModel:
             "flash_attn": self.config.flash_attention,
             "numa": self.config.numa,
             "seed": self.config.seed,
+            "embedding": self.config.embedding,
             "verbose": False,
         }
         if self.config.chat_format:
@@ -307,16 +369,26 @@ class KernelLoomModel:
             scheduler=self.config.scheduler or None,
         )
 
-    def _messages(self, value: str | Sequence[Message]) -> list[dict[str, str]]:
+    def _messages(self, value: str | Sequence[Message]) -> list[dict[str, Any]]:
         if isinstance(value, str):
             messages = [{"role": "user", "content": value}]
         else:
-            messages = [
-                {"role": str(message.get("role", "user")), "content": str(message.get("content", ""))}
-                for message in value
-            ]
+            messages = []
+            for message in value:
+                item: dict[str, Any] = {
+                    "role": str(message.get("role", "user")),
+                    "content": message.get("content", ""),
+                }
+                for key in ("name", "tool_call_id", "tool_calls"):
+                    if message.get(key) is not None:
+                        item[key] = message[key]
+                messages.append(item)
         if self.config.system_prompt and not any(item["role"] == "system" for item in messages):
             messages.insert(0, {"role": "system", "content": self.config.system_prompt})
-        if not messages or not any(item["content"].strip() for item in messages):
+        if not messages or not any(str(item.get("content", "")).strip() or item.get("tool_calls") for item in messages):
             raise ValueError("A prompt or at least one non-empty message is required")
         return messages
+
+
+def _flat_vector(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(item, (int, float)) for item in value)

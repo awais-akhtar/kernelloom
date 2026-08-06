@@ -1,24 +1,29 @@
 # LangChain integration
 
-KernelLoom provides `KernelLoomChatModel`, a `BaseChatModel` implementation for
-using a resident local model in LangChain runnables, prompt pipelines and
-applications.
+KernelLoom provides first-class local chat and embedding adapters. The goal is
+to let a LangChain application move from a hosted model to a resident GGUF model
+without losing the interfaces needed by real chains, agents, and RAG systems.
+
+## Five application problems KernelLoom handles
+
+1. **Blocking local runtimes** — native `ainvoke` and `astream` use KernelLoom's
+   async bridge instead of blocking the application event loop.
+2. **Agent compatibility** — `bind_tools` converts LangChain functions, tools,
+   Pydantic models, and JSON schemas into llama.cpp tool definitions.
+3. **Unreliable parsing** — `with_structured_output` supports validated Pydantic
+   results and dictionary schemas through the normal LangChain contract.
+4. **Local RAG plumbing** — `KernelLoomEmbeddings` batches documents through a
+   dedicated local sequence-embedding GGUF model.
+5. **Missing operational data** — responses expose standard token usage plus
+   backend, device, model ID, finish reason, and measured latency metadata.
 
 ## Install
-
-Install LangChain support with the runtime required by the model:
 
 ```bash
 pip install "kernelloom[langchain,llama]"
 ```
 
-For OpenVINO GenAI:
-
-```bash
-pip install "kernelloom[langchain,genai]"
-```
-
-## Basic invocation
+## Chat model
 
 ```python
 from kernelloom import KernelLoomModel, ModelConfig
@@ -34,26 +39,17 @@ chat = KernelLoomChatModel(runtime)
 try:
     response = chat.invoke("Explain continuous batching.")
     print(response.content)
+    print(response.usage_metadata)
+    print(response.response_metadata["latency_ms"])
 finally:
     runtime.close()
 ```
 
-## Use message objects
+The adapter participates in LangChain caching, callbacks, tracing, retry,
+fallback, batch, configurable, and runnable composition APIs inherited from
+`BaseChatModel`.
 
-```python
-from langchain_core.messages import HumanMessage, SystemMessage
-
-response = chat.invoke([
-    SystemMessage(content="You teach Python to experienced engineers."),
-    HumanMessage(content="Explain the descriptor protocol."),
-])
-print(response.content)
-```
-
-LangChain human, AI, system and tool message types are mapped to their matching
-chat roles. Message content is converted to text before it reaches the backend.
-
-## Prompt pipeline
+## Prompt pipelines
 
 ```python
 from langchain_core.prompts import ChatPromptTemplate
@@ -71,18 +67,131 @@ response = chain.invoke({
 print(response.content)
 ```
 
-## Streaming
+## Native async and streaming
 
 ```python
-for chunk in chat.stream("Compare prefill and decode workloads."):
-    print(chunk.content, end="", flush=True)
+import asyncio
+
+async def main():
+    response = await chat.ainvoke("Explain paged attention.")
+    print(response.content)
+
+    async for chunk in chat.astream("Summarize that in one sentence."):
+        print(chunk.content, end="", flush=True)
+
+asyncio.run(main())
 ```
 
-LangChain callbacks receive each fragment through `on_llm_new_token`.
+Synchronous and asynchronous callbacks receive each generated fragment. Calls
+to one resident model are serialized to protect its native context.
+
+## Tool calling and agents
+
+Use an instruct GGUF model with a tool-capable chat template. Tool support is a
+property of the model and template; KernelLoom does not pretend an incompatible
+model can call tools reliably.
+
+```python
+from langchain_core.tools import tool
+
+@tool
+def lookup_order(order_id: str) -> str:
+    """Look up the current state of an order."""
+    return f"Order {order_id} is ready."
+
+model_with_tools = chat.bind_tools([lookup_order])
+message = model_with_tools.invoke("Where is order A-104?")
+
+for call in message.tool_calls:
+    print(call["name"], call["args"], call["id"])
+```
+
+Force any tool or one named tool when the model/template supports it:
+
+```python
+required = chat.bind_tools([lookup_order], tool_choice="any")
+specific = chat.bind_tools([lookup_order], tool_choice="lookup_order")
+```
+
+`disable_streaming="tool_calling"` is enabled by default. Ordinary responses
+still stream, while tool requests use a complete response so their JSON
+arguments are not lost across partial chunks.
+
+## Structured output
+
+```python
+from pydantic import BaseModel, Field
+
+class Ticket(BaseModel):
+    title: str
+    priority: str = Field(description="low, medium, or high")
+
+extractor = chat.with_structured_output(Ticket)
+ticket = extractor.invoke("The checkout page is down for every customer.")
+print(ticket.title, ticket.priority)
+```
+
+To retain the raw local-model message when validation fails:
+
+```python
+result = chat.with_structured_output(Ticket, include_raw=True).invoke(
+    "Turn this report into a ticket."
+)
+print(result["raw"])
+print(result["parsed"])
+print(result["parsing_error"])
+```
+
+## Completely local RAG
+
+Use a dedicated GGUF embedding model that provides sequence-level pooling:
+
+```python
+from kernelloom.langchain import KernelLoomEmbeddings
+
+embeddings = KernelLoomEmbeddings(
+    "./models/nomic-embed-text-v1.5.Q8_0.gguf",
+    model_id="local-embeddings",
+    threads=8,
+)
+
+try:
+    documents = embeddings.embed_documents([
+        "KernelLoom keeps models resident.",
+        "Paged KV caches reduce allocation churn.",
+    ])
+    query = embeddings.embed_query("How are local models kept warm?")
+    print(len(documents), len(query))
+finally:
+    embeddings.close()
+```
+
+`aembed_documents` and `aembed_query` are available for async ingestion and
+retrieval. The adapter works with LangChain vector stores because it implements
+the standard `Embeddings` interface.
+
+## Messages and tool results
+
+Human, AI, system, and tool messages are preserved. Tool-call IDs and assistant
+tool-call history are passed back to llama.cpp, allowing an agent loop to join a
+tool result to the request that created it. Text content blocks are flattened;
+KernelLoom's current high-level LangChain adapter is text-only.
+
+## Token counting and metadata
+
+For GGUF models, LangChain token-budget helpers use the model's own tokenizer:
+
+```python
+count = chat.get_num_tokens("Count this with the local tokenizer.")
+```
+
+Every complete `AIMessage` includes:
+
+- `usage_metadata` with input, output, and total tokens when the backend reports it;
+- `response_metadata` with model ID, backend, device, latency, finish reason, and raw usage;
+- `tool_calls` in LangChain's standard normalized format.
 
 ## Per-call generation settings
-
-Generation arguments pass through to `KernelLoomModel`:
 
 ```python
 response = chat.invoke(
@@ -95,25 +204,19 @@ response = chat.invoke(
 )
 ```
 
-The available values are `max_new_tokens`, `temperature`, `top_p`, `top_k`,
-`repetition_penalty` and `stop_strings`.
+## Lifecycle and production use
 
-## Lifecycle
-
-`KernelLoomChatModel` does not take ownership of the underlying runtime. Keep
-the `KernelLoomModel` alive for as long as the chain is used and close it during
-application shutdown:
+The chat adapter accepts a resident `KernelLoomModel` and does not silently load
+a second copy. Close it during application shutdown. The adapter itself can be
+used as a context manager:
 
 ```python
 runtime = KernelLoomModel("./models/model.gguf")
-chat = KernelLoomChatModel(runtime)
 
-try:
-    # Build and run chains here.
-    ...
-finally:
-    runtime.close()
+with KernelLoomChatModel(runtime) as chat:
+    print(chat.invoke("Hello").content)
 ```
 
-One `KernelLoomModel` serializes access to its backend. Create separate model
-instances only when the backend and available memory can support them.
+Use separate chat and embedding models. Only create multiple instances when RAM
+and the backend can support them. Benchmark the exact models and workload rather
+than assuming thread or batch settings transfer between machines.

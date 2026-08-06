@@ -19,6 +19,10 @@ or expose a network service unless you start one.
 - Run GGUF chat models with `llama-cpp-python` on CPU or with optional GPU layers.
 - Run exported OpenVINO GenAI models on supported CPU, GPU and NPU devices.
 - Invoke a model with a string, chat messages, streaming Python, LangChain or HTTP.
+- Build local LangChain agents with tool calling and validated structured output.
+- Create local embeddings for RAG through LangChain, Python, CLI or `/v1/embeddings`.
+- Run a complete plug-and-play RAG pipeline with file loading, chunking, MMR,
+  metadata filters, citations, namespaces, and memory, SQLite, or custom vector stores.
 - Keep several named models resident behind one local service.
 - Use native async invoke and streaming APIs without blocking an event loop.
 - Tune mmap, mlock, micro-batches, batch threads, KQV offload and flash attention.
@@ -164,6 +168,7 @@ kernelloom run ./models/model.gguf "Write a haiku about compilers."
 kernelloom run ./models/model.gguf "Explain NUMA." --threads 8 --context-length 8192
 kernelloom chat ./models/model.gguf
 kernelloom benchmark ./models/model.gguf "Explain KV caches" --runs 5
+kernelloom embed ./models/embedding-model.gguf "document text"
 kernelloom inspect ./models/model.gguf
 kernelloom hardware
 kernelloom doctor
@@ -244,6 +249,41 @@ Set `KERNELLOOM_API_KEY` before starting the server to require a bearer token.
 The `/health`, `/ready` and `/metrics` routes remain unauthenticated for local
 process checks and monitoring.
 
+## Plug-and-play RAG
+
+Use a chat model, an embedding model, and either the built-in persistent SQLite
+store or an in-memory store:
+
+```python
+from kernelloom import KernelLoomModel, ModelConfig, RAGConfig, RAGPipeline
+
+chat = KernelLoomModel("./models/chat.gguf")
+embeddings = KernelLoomModel(ModelConfig("./models/embed.gguf", embedding=True))
+rag = RAGPipeline.local(
+    chat,
+    embeddings,
+    database="./data/knowledge.db",
+    config=RAGConfig(namespace="docs", retrieval="mmr", top_k=5, fetch_k=15),
+)
+
+try:
+    rag.ingest("./docs", metadata={"audience": "developers"})
+    result = rag.ask(
+        "How do I start the API?",
+        filters={"audience": "developers"},
+    )
+    print(result.answer)
+    print(result.to_dict()["sources"])
+finally:
+    rag.close()
+```
+
+The pipeline accepts inline text, `Document` objects, text/Markdown, JSON,
+JSONL, CSV, directories, custom loaders, custom splitters, LangChain-compatible
+embedders, and custom vector databases. See the [complete RAG guide](docs/RAG.md)
+for async use, multi-tenant namespaces, retrieval tuning, and a custom database
+adapter example.
+
 ## LangChain
 
 ```python
@@ -258,6 +298,37 @@ print(response.content)
 
 for chunk in llm.stream("Explain model quantization."):
     print(chunk.content, end="", flush=True)
+```
+
+The adapter also supports native async calls, LangChain tools and Pydantic
+structured output. Use a GGUF instruct model whose chat template supports tool
+calling:
+
+```python
+from pydantic import BaseModel, Field
+
+class SearchCode(BaseModel):
+    query: str = Field(description="Code search query")
+
+tool_model = llm.bind_tools([SearchCode])
+response = tool_model.invoke("Find the database connection code")
+print(response.tool_calls)
+
+structured_model = llm.with_structured_output(SearchCode)
+print(structured_model.invoke("Create a search for authentication middleware"))
+```
+
+For completely local RAG, use a dedicated sequence-embedding GGUF model:
+
+```python
+from kernelloom.langchain import KernelLoomEmbeddings
+
+embeddings = KernelLoomEmbeddings("./models/nomic-embed-text.gguf")
+try:
+    query_vector = embeddings.embed_query("How does prefix caching work?")
+    document_vectors = embeddings.embed_documents(["document one", "document two"])
+finally:
+    embeddings.close()
 ```
 
 Close the underlying `KernelLoomModel` when the application shuts down.

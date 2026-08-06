@@ -112,6 +112,7 @@ service before using it across an untrusted network.
 | `DELETE` | `/v1/models/{model_id}` | Unload a resident model. |
 | `POST` | `/v1/chat/completions` | Chat completion, with optional SSE streaming. |
 | `POST` | `/v1/completions` | Plain text completion. |
+| `POST` | `/v1/embeddings` | Batch embeddings from a resident local GGUF embedding model. |
 
 ## Load a model
 
@@ -215,6 +216,28 @@ curl http://127.0.0.1:11435/v1/completions \
 
 Text completion currently returns a complete response rather than an event
 stream. Use chat completions when streaming is required.
+
+## Embeddings
+
+Load a dedicated sequence-embedding GGUF with embedding mode enabled:
+
+```bash
+curl http://127.0.0.1:11435/v1/models/load \
+  -H "Content-Type: application/json" \
+  -d '{"model_path":"./models/nomic-embed-text.gguf","model_id":"embed","embedding":true}'
+```
+
+Embed one string or a batch:
+
+```bash
+curl http://127.0.0.1:11435/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"embed","input":["first document","second document"]}'
+```
+
+The model must produce one sequence-level vector per input. KernelLoom rejects
+token-level matrices rather than silently returning a shape most vector stores
+cannot use.
 
 ## Python requests client
 

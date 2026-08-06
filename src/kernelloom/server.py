@@ -242,6 +242,31 @@ def create_app(
             "usage": result.metadata.get("usage", {}),
         }
 
+    @app.post("/v1/embeddings", dependencies=[Depends(authorize)])
+    def embeddings(payload: dict[str, Any]) -> dict[str, Any]:
+        model = _selected_model(registry, payload, HTTPException)
+        values = payload.get("input")
+        texts = [values] if isinstance(values, str) else values
+        if not isinstance(texts, list) or not texts or any(not isinstance(item, str) for item in texts):
+            raise HTTPException(status_code=422, detail="input must be a string or a non-empty list of strings")
+        started = metrics.start()
+        try:
+            vectors = model.embed_many(texts)
+            token_count = sum(model.count_tokens(text) for text in texts)
+        except Exception as exc:
+            metrics.finish(started, failed=True)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        metrics.finish(started)
+        return {
+            "object": "list",
+            "model": model.config.model_id,
+            "data": [
+                {"object": "embedding", "index": index, "embedding": vector}
+                for index, vector in enumerate(vectors)
+            ],
+            "usage": {"prompt_tokens": token_count, "total_tokens": token_count},
+        }
+
     return app
 
 

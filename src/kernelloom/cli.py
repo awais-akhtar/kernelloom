@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--runs", type=int, default=3)
     benchmark.add_argument("--max-tokens", type=int, default=64)
 
+    embed = subparsers.add_parser("embed", help="Create a vector with a local GGUF embedding model")
+    _model_arguments(embed)
+    embed.add_argument("text")
+
     inspect = subparsers.add_parser("inspect", help="Inspect a local model without loading its weights")
     inspect.add_argument("model_path")
     inspect.add_argument("--data-dir", default="")
@@ -93,16 +97,21 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             engine.close()
         return 0
-    if args.command in {"run", "chat", "benchmark"}:
+    if args.command in {"run", "chat", "benchmark", "embed"}:
         config = _config_from_args(args)
+        if args.command == "embed":
+            config.embedding = True
         with KernelLoomModel(config) as model:
             if args.command == "run":
                 result = model.generate(args.prompt, max_new_tokens=args.max_tokens, temperature=args.temperature)
                 print(result.text)
             elif args.command == "chat":
                 _interactive_chat(model, args.max_tokens, args.temperature)
-            else:
+            elif args.command == "benchmark":
                 _benchmark(model, args.prompt, args.runs, args.max_tokens)
+            else:
+                vector = model.embed(args.text)
+                print(json.dumps({"model": model.config.model_id, "dimensions": len(vector), "embedding": vector}))
         return 0
 
     try:
