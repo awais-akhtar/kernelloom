@@ -114,9 +114,9 @@ The expected artifacts are a universal wheel and a source distribution.
 
 ## Automatic PyPI publishing
 
-The repository workflow at `.github/workflows/publish.yml` is configured to run
-on pushes to `main` and can also be started manually. A publish still depends on
-the GitHub environment, the PyPI token, successful verification, and PyPI.
+The repository workflow at `.github/workflows/publish.yml` runs on pushes to
+`main` and can also be started manually. A publish still depends on the GitHub
+environment, the PyPI token, successful verification, and PyPI.
 
 Configure a GitHub repository secret named `PYPI_API_TOKEN` containing a PyPI
 project or account token. The workflow:
@@ -125,21 +125,19 @@ project or account token. The workflow:
 2. runs the full test suite on Python 3.11, 3.12, and 3.13;
 3. installs the server, LangChain, FastEmbed, and FAISS extras on the package
    build runner and runs the tests again;
-4. derives a unique post-release version from the GitHub run number;
+4. checks that all source version declarations match and that PyPI does not
+   already contain the release version;
 5. builds the wheel and source distribution;
 6. validates both artifacts with Twine;
 7. publishes the artifacts to PyPI after the verification and build jobs pass.
 
-For example, base version `0.4.0` and workflow run `12` produce
-`0.4.0.post12`. PyPI files are immutable, so the unique post-release prevents a
-later push from attempting to overwrite an earlier artifact. A re-run of the
-same workflow uses the same version and safely skips files PyPI already has.
-Standard `pip install kernelloom` considers post-releases newer than their base
-release.
-
-When beginning a new release line, update `project.version` in
-`pyproject.toml`. The package reads its installed version from distribution
-metadata, so `kernelloom.__version__` matches the CI-generated version.
+PyPI filenames are immutable. Before a release, choose a new normal version
+such as `0.4.1`; do not reuse an existing version. Update `project.version` in
+`pyproject.toml`,
+`kernelloom._SOURCE_VERSION`, and `openagent_engine.__version__` together.
+When that commit reaches `main`, the workflow checks the exact version against
+PyPI before it runs the build. If the version is already published, the
+workflow stops and the next release must bump the version first.
 
 ## Forks and pull requests
 
@@ -154,8 +152,9 @@ Before merging or pushing to `main`:
 
 1. Run the local tests.
 2. Build and validate both distributions.
-3. Confirm the base version is correct.
+3. Bump the version to an unused `major.minor.patch` release and verify every
+   source declaration matches it.
 4. Review README rendering for both GitHub and PyPI.
 5. Confirm `PYPI_API_TOKEN` is current and scoped appropriately.
-6. Check the GitHub Actions run after the push.
+6. Push the version-bump commit to `main` and check the GitHub Actions run.
 7. Install the published wheel in a clean environment and run an import smoke test.

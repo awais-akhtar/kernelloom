@@ -23,14 +23,10 @@ from .rag import (
 )
 from .settings import RuntimeConfig, load_runtime_config
 
-_SOURCE_VERSION = "0.4.0"
+_SOURCE_VERSION = "0.4.1"
 try:
     _installed_version = version("kernelloom")
-    __version__ = (
-        _installed_version
-        if _installed_version == _SOURCE_VERSION or _installed_version.startswith(f"{_SOURCE_VERSION}.post")
-        else _SOURCE_VERSION
-    )
+    __version__ = _installed_version if _installed_version == _SOURCE_VERSION else _SOURCE_VERSION
 except PackageNotFoundError:
     __version__ = _SOURCE_VERSION
 

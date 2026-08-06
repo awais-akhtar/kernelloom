@@ -173,9 +173,11 @@ python -m build
 python -m twine check dist/*
 ```
 
-The release workflow is configured to test and attempt a PyPI publish on pushes
-to `main`. It builds a unique post-release version, for example
-`0.4.0.post12`; a successful upload still depends on GitHub environment approval,
-the PyPI token, package validation, and PyPI availability.
+Every PyPI release uses an explicit `major.minor.patch` version. Update the
+version to the next release (for example, `0.4.0` to `0.4.1`), commit it, and
+push it to `main`. The publish workflow checks PyPI first and stops if that
+version already exists, so the next release must be bumped normally instead of
+reusing the same release number. A successful upload still depends on GitHub
+environment approval, the PyPI token, package validation, and PyPI availability.
 
 KernelLoom is available under the [MIT License](https://github.com/awais-akhtar/kernelloom/blob/main/LICENSE).
