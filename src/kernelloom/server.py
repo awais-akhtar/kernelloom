@@ -60,10 +60,14 @@ class ModelRegistry:
     def load(self, values: dict[str, Any]) -> dict[str, Any]:
         config = ModelConfig(**values)
         with self._lock:
-            if config.model_id not in self._models and len(self._models) >= self.max_models:
+            existing = self._models.get(config.model_id)
+            if existing is not None and existing.config.to_dict() == config.to_dict():
+                return {**existing.info(), "reused": True}
+            if existing is None and len(self._models) >= self.max_models:
                 raise RuntimeError(f"Model limit reached ({self.max_models}); unload one before loading another")
-        model = KernelLoomModel(config).load()
-        with self._lock:
+            # Keep lifecycle operations serialized: concurrent replacements must
+            # never leave two native contexts claiming the same model ID.
+            model = KernelLoomModel(config).load()
             previous = self._models.get(config.model_id)
             self._models[config.model_id] = model
         if previous is not None:
@@ -88,6 +92,11 @@ class ModelRegistry:
             return False
         model.close()
         return True
+
+    def warm(self, model_id: str, **options: Any) -> dict[str, Any]:
+        """Warm an already-resident model without replacing its native context."""
+
+        return self.get(model_id).warmup(**options)
 
     def close(self) -> None:
         with self._lock:
@@ -187,6 +196,24 @@ def create_app(
         if not registry.unload(model_id):
             raise HTTPException(status_code=404, detail="Model is not loaded")
         return {"id": model_id, "deleted": True}
+
+    @app.post("/v1/models/{model_id}/warm", dependencies=[Depends(authorize)])
+    def warm_model(model_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        values = payload or {}
+        try:
+            return {
+                "id": model_id,
+                **registry.warm(
+                    model_id,
+                    prompt=values.get("prompt"),
+                    iterations=int(values.get("iterations", 1)),
+                    max_new_tokens=values.get("max_tokens"),
+                ),
+            }
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Model is not loaded") from exc
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/v1/chat/completions", dependencies=[Depends(authorize)])
     def chat_completions(payload: dict[str, Any]) -> Any:

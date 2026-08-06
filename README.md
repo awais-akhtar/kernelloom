@@ -5,11 +5,11 @@
 [![Python](https://img.shields.io/pypi/pyversions/kernelloom.svg)](https://pypi.org/project/kernelloom/)
 [![License](https://img.shields.io/github/license/awais-akhtar/kernelloom.svg)](https://github.com/awais-akhtar/kernelloom/blob/main/LICENSE)
 
-KernelLoom is a local AI inference engine built to make models run smoothly on
-your own hardware. It keeps weights resident, gives GGUF and OpenVINO GenAI one
-Python API, serves a familiar HTTP protocol, integrates with LangChain, and
-includes hardware-aware inspection and planning tools. It is not a cloud-model
-gateway: model execution stays on the machine running KernelLoom.
+KernelLoom is a CPU-first local AI inference engine built to make models run
+smoothly on your own hardware. It keeps weights resident, gives GGUF and
+OpenVINO GenAI one Python API, serves a familiar HTTP protocol, integrates with
+LangChain, and includes hardware-aware inspection and planning tools. It is not
+a cloud-model gateway: model execution stays on the machine running KernelLoom.
 
 KernelLoom is local by default. It does not download models, enable telemetry,
 or expose a network service unless you start one.
@@ -17,12 +17,18 @@ or expose a network service unless you start one.
 ## Highlights
 
 - Run GGUF chat models with `llama-cpp-python` on CPU or with optional GPU layers.
-- Run exported OpenVINO GenAI models on supported CPU, GPU and NPU devices.
+- Run exported OpenVINO GenAI models (including compatible Qwen, Phi, Mistral,
+  Gemma and Llama families) on supported CPU, GPU and NPU devices.
+- Pick a CPU latency, balanced, throughput, or efficient execution profile that
+  respects process-visible cores instead of blindly consuming the machine.
+- Keep chat and embedding models warm; use compact bounded LRU embedding/token
+  caches to remove repeat CPU work without unbounded RAM growth.
 - Invoke a model with a string, chat messages, streaming Python, LangChain or HTTP.
 - Build local LangChain agents with tool calling and validated structured output.
 - Create local embeddings for RAG through LangChain, Python, CLI or `/v1/embeddings`.
 - Run a complete plug-and-play RAG pipeline with file loading, chunking, MMR,
-  metadata filters, citations, namespaces, and memory, SQLite, or custom vector stores.
+  metadata filters, citations, namespaces, query warming, and memory, SQLite,
+  FAISS, or custom vector stores.
 - Keep several named models resident behind one local service.
 - Use native async invoke and streaming APIs without blocking an event loop.
 - Tune mmap, mlock, micro-batches, batch threads, KQV offload and flash attention.
@@ -57,6 +63,9 @@ pip install "kernelloom[genai]"       # OpenVINO GenAI text generation
 pip install "kernelloom[onnx]"        # richer ONNX inspection
 pip install "kernelloom[server]"      # HTTP API and browser console
 pip install "kernelloom[langchain]"   # LangChain adapter
+pip install "kernelloom[fastembed]"   # ONNX Runtime CPU embedding models
+pip install "kernelloom[faiss]"       # fast native CPU vector search
+pip install "kernelloom[rag]"         # FastEmbed + FAISS RAG acceleration
 pip install "kernelloom[all]"         # all main runtime integrations
 ```
 
@@ -86,6 +95,38 @@ with KernelLoomModel(config) as model:
 When `threads=0`, KernelLoom leaves one logical CPU available for the rest of
 the system. Set `gpu_layers` to a positive value only when your llama.cpp build
 supports the intended accelerator.
+
+### CPU-first performance and warm startup
+
+Use a deliberate CPU profile instead of guessing thread counts. `auto` maps to
+the balanced profile; explicit `threads` and `batch_threads` always take
+priority over the recommendation.
+
+```python
+from kernelloom import KernelLoomModel, ModelConfig, plan_cpu_execution
+
+print(plan_cpu_execution("throughput").to_dict())
+
+model = KernelLoomModel(ModelConfig(
+    "./models/model-q4_k_m.gguf",
+    cpu_profile="latency",       # latency, balanced, throughput, efficient
+    reserve_cores=1,
+    auto_batch_size=True,         # use this profile's safe batch starting point
+    warmup=True,                  # fault in weights/tokenizer during load
+    embedding_cache_size=512,
+    embedding_cache_max_bytes=16 * 1024 * 1024,
+))
+try:
+    model.load()
+    print(model.info()["load"]["cpu_plan"])
+    print(model.invoke("Explain why quantization helps CPU inference."))
+finally:
+    model.close()
+```
+
+`warmup()` runs a real bounded local generation or embedding call. Models stay
+resident until you close them; repeated server loads with the same configuration
+reuse the existing warm instance instead of reloading it.
 
 ### Chat and stream
 
@@ -169,6 +210,9 @@ kernelloom run ./models/model.gguf "Explain NUMA." --threads 8 --context-length 
 kernelloom chat ./models/model.gguf
 kernelloom benchmark ./models/model.gguf "Explain KV caches" --runs 5
 kernelloom embed ./models/embedding-model.gguf "document text"
+kernelloom warm ./models/model.gguf --cpu-profile latency
+kernelloom warm ./models/embedding-model.gguf --embedding --iterations 2
+kernelloom cpu-plan --profile throughput
 kernelloom inspect ./models/model.gguf
 kernelloom hardware
 kernelloom doctor
@@ -283,6 +327,23 @@ JSONL, CSV, directories, custom loaders, custom splitters, LangChain-compatible
 embedders, and custom vector databases. See the [complete RAG guide](docs/RAG.md)
 for async use, multi-tenant namespaces, retrieval tuning, and a custom database
 adapter example.
+
+For high-volume CPU retrieval, swap the store and/or embedder without changing
+the rest of the pipeline:
+
+```python
+from kernelloom import FaissVectorStore, FastEmbedEmbedder, RAGPipeline
+
+embeddings = FastEmbedEmbedder("BAAI/bge-small-en-v1.5", threads=4)
+rag = RAGPipeline(chat, embeddings, store=FaissVectorStore())
+rag.ingest("./knowledge")
+rag.warmup(["What does this knowledge base cover?"])
+print(rag.ask("What does this knowledge base cover?").answer)
+```
+
+FAISS and FastEmbed are optional local dependencies. See the [complete RAG
+guide](docs/RAG.md) and [CPU-first guide](docs/CPU_FIRST.md) for sizing and
+tuning guidance.
 
 ## LangChain
 

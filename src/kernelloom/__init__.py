@@ -5,7 +5,10 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from .config import ModelConfig
+from .cpu import CPUExecutionPlan, available_cpu_cores, plan_cpu_execution
 from .model import GenerationResult, KernelLoomModel
+from .embeddings import EmbeddingModelInfo, FastEmbedEmbedder
+from .faiss_store import FaissUnavailableError, FaissVectorStore, faiss_available
 from .rag import (
     Document,
     DocumentLoader,
@@ -46,6 +49,14 @@ __all__ = [
     "GenerationResult",
     "KernelLoomModel",
     "ModelConfig",
+    "CPUExecutionPlan",
+    "available_cpu_cores",
+    "plan_cpu_execution",
+    "EmbeddingModelInfo",
+    "FastEmbedEmbedder",
+    "FaissUnavailableError",
+    "FaissVectorStore",
+    "faiss_available",
     "Document",
     "DocumentLoader",
     "InMemoryVectorStore",

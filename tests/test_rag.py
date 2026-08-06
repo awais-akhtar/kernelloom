@@ -20,7 +20,11 @@ from kernelloom import (
 class KeywordEmbedder:
     words = ("python", "rust", "database", "ocean")
 
+    def __init__(self) -> None:
+        self.calls = 0
+
     def embed(self, text: str) -> list[float]:
+        self.calls += 1
         lowered = text.lower()
         return [float(lowered.count(word)) for word in self.words]
 
@@ -126,6 +130,22 @@ class RAGTests(unittest.TestCase):
         )
         pipeline.ingest("Python database guide")
         self.assertEqual(pipeline.ask("python").answer, "message answer")
+
+    def test_query_cache_avoids_repeat_embedding_and_invalidates_on_ingest(self) -> None:
+        embedder = KeywordEmbedder()
+        pipeline = RAGPipeline(
+            FakeGenerator(), embedder, config=RAGConfig(chunk_size=100, chunk_overlap=10, retrieval="similarity")
+        )
+        pipeline.ingest("Python database guide")
+        after_ingest = embedder.calls
+        first = pipeline.retrieve("python database")
+        second = pipeline.retrieve("python database")
+        self.assertEqual(first, second)
+        self.assertEqual(embedder.calls, after_ingest + 1)
+        self.assertEqual(pipeline.cache_info()["query_hits"], 1)
+        pipeline.ingest("Python database policy")
+        pipeline.retrieve("python database")
+        self.assertEqual(embedder.calls, after_ingest + 3)
 
 
 if __name__ == "__main__":

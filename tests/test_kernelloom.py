@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from kernelloom import KernelLoomModel, ModelConfig, __version__
+from kernelloom.cli import build_parser
 
 
 class FakeLlama:
@@ -46,6 +47,24 @@ class FakeLlama:
 
     def tokenize(self, value, *, add_bos):
         return value.split()
+
+
+class CountingLlama(FakeLlama):
+    embedding_calls = 0
+    token_calls = 0
+    completion_calls = 0
+
+    def create_embedding(self, *, input):
+        type(self).embedding_calls += 1
+        return super().create_embedding(input=input)
+
+    def tokenize(self, value, *, add_bos):
+        type(self).token_calls += 1
+        return super().tokenize(value, add_bos=add_bos)
+
+    def create_chat_completion(self, *, messages, stream=False, **settings):
+        type(self).completion_calls += 1
+        return super().create_chat_completion(messages=messages, stream=stream, **settings)
 
 
 class KernelLoomTests(unittest.TestCase):
@@ -126,6 +145,44 @@ class KernelLoomTests(unittest.TestCase):
             {"role": "user", "content": "Hello"},
         ])
         self.assertEqual(len([item for item in messages if item["role"] == "system"]), 1)
+
+    def test_cpu_profile_warmup_and_compact_local_caches(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "embed.gguf"
+            path.write_bytes(b"test")
+            CountingLlama.embedding_calls = 0
+            CountingLlama.token_calls = 0
+            CountingLlama.completion_calls = 0
+            with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=CountingLlama)}):
+                model = KernelLoomModel(ModelConfig(
+                    str(path), embedding=True, cpu_profile="throughput", auto_batch_size=True,
+                    embedding_cache_size=2, embedding_cache_max_bytes=64,
+                ))
+                self.assertEqual(model.embed_many(["same", "same", "other"]), [[4.0, 1.0], [4.0, 1.0], [5.0, 2.0]])
+                self.assertEqual(CountingLlama.embedding_calls, 1)
+                model.embed("same")
+                self.assertEqual(CountingLlama.embedding_calls, 1)
+                model.count_tokens("one two")
+                model.count_tokens("one two")
+                self.assertEqual(CountingLlama.token_calls, 1)
+                warm = model.warmup(iterations=2)
+                self.assertEqual(warm["kind"], "embedding")
+                self.assertEqual(CountingLlama.embedding_calls, 3)
+                self.assertEqual(model.info()["load"]["cpu_plan"]["profile"], "throughput")
+                self.assertEqual(model._backend.options["n_batch"], 1024)
+                self.assertLessEqual(model.cache_info()["embedding_bytes"], 64)
+                with self.assertRaises(ValueError):
+                    model.warmup(prompt="", max_new_tokens=0)
+                model.close()
+
+    def test_cli_exposes_cpu_planning_and_warmup(self) -> None:
+        parser = build_parser()
+        plan = parser.parse_args(["cpu-plan", "--profile", "throughput", "--available-cores", "4"])
+        warm = parser.parse_args(["warm", "model.gguf", "--embedding", "--cpu-profile", "latency"])
+        self.assertEqual(plan.command, "cpu-plan")
+        self.assertEqual(plan.available_cores, 4)
+        self.assertTrue(warm.embedding)
+        self.assertEqual(warm.cpu_profile, "latency")
 
 
 if __name__ == "__main__":

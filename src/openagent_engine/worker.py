@@ -35,6 +35,11 @@ ALLOWED_DEVICE_PROPERTIES = {
     "KV_CACHE_PRECISION", "GPU_ENABLE_SDPA_OPTIMIZATION", "GPU_ENABLE_LORA_OPERATION",
     "NPU_TURBO", "NPU_COMPILER_DYNAMIC_QUANTIZATION", "NPU_QDQ_OPTIMIZATION",
     "NPU_COMPILATION_MODE_PARAMS",
+    # Applied only when the installed OpenVINO device advertises support.
+    "INFERENCE_NUM_THREADS", "ENABLE_CPU_PINNING", "ENABLE_HYPER_THREADING", "SCHEDULING_CORE_TYPE",
+}
+CPU_TUNABLE_PROPERTIES = {
+    "INFERENCE_NUM_THREADS", "ENABLE_CPU_PINNING", "ENABLE_HYPER_THREADING", "SCHEDULING_CORE_TYPE",
 }
 
 
@@ -48,6 +53,7 @@ class GenericSession:
     inputs: list[dict[str, Any]]
     outputs: list[dict[str, Any]]
     config: dict[str, Any]
+    signature: str
     loaded_at: float
     calls: int = 0
     total_infer_ms: float = 0.0
@@ -60,6 +66,7 @@ class LLMSession:
     device: str
     pipeline: Any
     config: dict[str, Any]
+    signature: str
     loaded_at: float
     calls: int = 0
     total_generate_ms: float = 0.0
@@ -122,12 +129,19 @@ class HardwareWorker:
         path = _model_file(command.get("path"))
         device = _device(command.get("device", "CPU"))
         model_id = _model_id(command.get("model_id"), path, device)
+        config = _device_config(command.get("config"), cache_dir=command.get("cache_dir"), device=device)
+        config = _filter_cpu_properties(self.core, device, config)
+        signature = _session_signature(path, device, config)
         existing = self.models.get(model_id)
-        if isinstance(existing, GenericSession) and existing.path == str(path) and existing.device == device:
+        if (
+            isinstance(existing, GenericSession)
+            and existing.path == str(path)
+            and existing.device == device
+            and existing.signature == signature
+        ):
             result = self._session_status(existing)
             result["cache_hit"] = True
             return result
-        config = _device_config(command.get("config"), cache_dir=command.get("cache_dir"), device=device)
         started = time.perf_counter()
         model = self.core.read_model(str(path))
         read_ms = (time.perf_counter() - started) * 1000
@@ -143,6 +157,7 @@ class HardwareWorker:
             inputs=[_port_record(port) for port in compiled.inputs],
             outputs=[_port_record(port) for port in compiled.outputs],
             config=config,
+            signature=signature,
             loaded_at=time.time(),
         )
         self.models[model_id] = session
@@ -161,13 +176,21 @@ class HardwareWorker:
         path = _model_directory(command.get("path"))
         device = _device(command.get("device", "GPU"))
         model_id = _model_id(command.get("model_id"), path, device)
+        config = _device_config(command.get("config"), cache_dir=command.get("cache_dir"), device=device)
+        config = _filter_cpu_properties(self.core, device, config)
+        scheduler_config = command.get("scheduler")
+        scheduler_signature = _scheduler_signature(scheduler_config)
+        signature = _session_signature(path, device, config, scheduler_signature)
         existing = self.models.get(model_id)
-        if isinstance(existing, LLMSession) and existing.path == str(path) and existing.device == device:
+        if (
+            isinstance(existing, LLMSession)
+            and existing.path == str(path)
+            and existing.device == device
+            and existing.signature == signature
+        ):
             result = self._session_status(existing)
             result["cache_hit"] = True
             return result
-        config = _device_config(command.get("config"), cache_dir=command.get("cache_dir"), device=device)
-        scheduler_config = command.get("scheduler")
         if isinstance(scheduler_config, dict) and scheduler_config.get("enabled"):
             scheduler = ov_genai.SchedulerConfig()
             for name in (
@@ -180,7 +203,7 @@ class HardwareWorker:
         started = time.perf_counter()
         pipeline = ov_genai.LLMPipeline(str(path), device, config)
         load_ms = (time.perf_counter() - started) * 1000
-        session = LLMSession(model_id, str(path), device, pipeline, config, time.time())
+        session = LLMSession(model_id, str(path), device, pipeline, config, signature, time.time())
         self.models[model_id] = session
         return {
             **self._session_status(session),
@@ -493,12 +516,14 @@ class HardwareWorker:
                 "path": session.path, "device": session.device, "inputs": session.inputs,
                 "outputs": session.outputs, "calls": session.calls,
                 "average_infer_ms": round(average, 4), "loaded_at": session.loaded_at,
+                "configuration_fingerprint": session.signature[:16],
             }
         average = session.total_generate_ms / session.calls if session.calls else 0.0
         return {
             "status": "resident", "kind": "llm", "model_id": session.id,
             "path": session.path, "device": session.device, "calls": session.calls,
             "average_generate_ms": round(average, 4), "loaded_at": session.loaded_at,
+            "configuration_fingerprint": session.signature[:16],
         }
 
 
@@ -554,6 +579,47 @@ def _device_config(value: object, *, cache_dir: object = "", device: str = "CPU"
         cache.mkdir(parents=True, exist_ok=True)
         result["CACHE_DIR"] = str(cache)
     return result
+
+
+def _filter_cpu_properties(core: Any, device: str, config: dict[str, Any]) -> dict[str, Any]:
+    """Avoid passing CPU-only knobs to OpenVINO builds that do not expose them."""
+
+    requested = set(config).intersection(CPU_TUNABLE_PROPERTIES)
+    if not requested:
+        return config
+    try:
+        supported = {str(value).upper() for value in core.get_property(device, "SUPPORTED_PROPERTIES")}
+    except Exception:
+        # A conservative fallback: unknown properties can make compilation
+        # fail, so omit only the optional CPU tuning hints.
+        supported = set()
+    return {
+        key: value
+        for key, value in config.items()
+        if key not in CPU_TUNABLE_PROPERTIES or key in supported
+    }
+
+
+def _scheduler_signature(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "enabled", "cache_size", "max_num_batched_tokens", "max_num_seqs", "num_kv_blocks",
+        "enable_prefix_caching", "dynamic_split_fuse",
+    }
+    return {str(key): item for key, item in value.items() if str(key) in allowed}
+
+
+def _session_signature(path: Path, device: str, config: dict[str, Any], scheduler: dict[str, Any] | None = None) -> str:
+    """Fingerprint effective native options so a changed tuning request reloads."""
+
+    payload = {
+        "path": str(path),
+        "device": device,
+        "config": _json_safe(config),
+        "scheduler": _json_safe(scheduler or {}),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def _generation_config(value: object) -> dict[str, Any]:

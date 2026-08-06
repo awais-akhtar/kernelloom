@@ -19,8 +19,11 @@ class ModelConfig:
     context_length: int = 4096
     batch_size: int = 512
     micro_batch_size: int = 0
+    auto_batch_size: bool = False
     threads: int = 0
     batch_threads: int = 0
+    cpu_profile: str = "auto"
+    reserve_cores: int = 1
     gpu_layers: int = 0
     use_mmap: bool = True
     use_mlock: bool = False
@@ -30,6 +33,12 @@ class ModelConfig:
     chat_format: str = ""
     seed: int = -1
     embedding: bool = False
+    embedding_cache_size: int = 512
+    embedding_cache_max_bytes: int = 16 * 1024 * 1024
+    token_cache_size: int = 4096
+    warmup: bool = False
+    warmup_prompt: str = "KernelLoom warmup."
+    warmup_tokens: int = 1
     max_new_tokens: int = 256
     temperature: float = 0.7
     top_p: float = 0.9
@@ -54,6 +63,11 @@ class ModelConfig:
             raise ValueError("micro_batch_size must be zero (auto) or no larger than batch_size")
         if self.threads < 0 or self.batch_threads < 0:
             raise ValueError("thread counts cannot be negative")
+        self.cpu_profile = self.cpu_profile.strip().lower() or "auto"
+        if self.cpu_profile not in {"auto", "latency", "balanced", "throughput", "efficient"}:
+            raise ValueError("cpu_profile must be auto, latency, balanced, throughput, or efficient")
+        if self.reserve_cores < 0:
+            raise ValueError("reserve_cores cannot be negative")
         if self.gpu_layers < -1:
             raise ValueError("gpu_layers must be -1 (all), 0 (CPU), or positive")
         if self.max_new_tokens < 1:
@@ -64,6 +78,10 @@ class ModelConfig:
             raise ValueError("top_p must be between 0 and 1")
         if self.top_k < 0:
             raise ValueError("top_k cannot be negative")
+        if self.embedding_cache_size < 0 or self.embedding_cache_max_bytes < 0 or self.token_cache_size < 0:
+            raise ValueError("cache sizes cannot be negative")
+        if self.warmup_tokens < 1:
+            raise ValueError("warmup_tokens must be positive")
 
     @property
     def resolved_backend(self) -> str:

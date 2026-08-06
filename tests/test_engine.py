@@ -27,7 +27,7 @@ from openagent_engine.scheduler import (
     RequestPhase,
     RequestPriority,
 )
-from openagent_engine.worker import _device_config, _process_alive
+from openagent_engine.worker import _device_config, _filter_cpu_properties, _process_alive, _session_signature
 
 
 def hardware_profile() -> HardwareProfile:
@@ -236,12 +236,39 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(_process_alive(os.getpid()))
         self.assertFalse(_process_alive(-1))
         self.assertEqual(_device_config({}, device="GPU.0")["PERFORMANCE_HINT"], "LATENCY")
+        cpu_config = _device_config({"inference_num_threads": 6, "untrusted": "ignored"}, device="CPU")
+        self.assertEqual(cpu_config["INFERENCE_NUM_THREADS"], 6)
+
+        class Core:
+            def get_property(self, _device, _property):
+                return ["INFERENCE_NUM_THREADS"]
+
+        self.assertEqual(
+            _filter_cpu_properties(Core(), "CPU", {"INFERENCE_NUM_THREADS": 6, "ENABLE_CPU_PINNING": True}),
+            {"INFERENCE_NUM_THREADS": 6},
+        )
+        path = Path("model.xml")
+        first = _session_signature(path, "CPU", {"INFERENCE_NUM_THREADS": 4})
+        second = _session_signature(path, "CPU", {"INFERENCE_NUM_THREADS": 6})
+        self.assertNotEqual(first, second)
         with tempfile.TemporaryDirectory() as temp:
             profiler = HardwareProfiler(temp, accelerator_python=str(Path(temp) / "missing"))
             status = DirectHardwareClient(profiler).status()
         self.assertFalse(status["running"])
         self.assertEqual(status["transport"], "inherited-jsonl-pipes")
         self.assertNotIn("port", status)
+
+    def test_auto_direct_target_prefers_verified_accelerator(self) -> None:
+        cpu = hardware_profile().devices[0]
+        gpu = DeviceProfile(
+            id="gpu:0", kind="gpu", name="Test GPU", vendor="generic", memory_gb=4,
+            unified_memory=False, compute_tops=4, memory_bandwidth_gbps=100,
+            precisions=("fp16",), supported_ops=(), backends=("openvino",),
+            capabilities={"openvino": {"id": "GPU.0"}},
+        )
+        device, target = AdaptiveExecutionEngine._direct_target(None, (cpu, gpu), "AUTO")
+        self.assertEqual(device.id, "gpu:0")
+        self.assertEqual(target, "GPU.0")
 
 
 if __name__ == "__main__":

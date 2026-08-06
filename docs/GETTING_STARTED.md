@@ -10,6 +10,8 @@ KernelLoom has two high-level text-generation paths:
 
 - A `.gguf` file runs through `llama-cpp-python`.
 - An OpenVINO GenAI export directory runs through an isolated OpenVINO worker.
+  Compatible exports include Llama, Qwen, Phi, Mistral, and Gemma when they are
+  supported by the installed OpenVINO GenAI release.
 
 ONNX and individual OpenVINO IR files are available through the lower-level
 generic tensor inference API. SafeTensors can be inspected and planned, but
@@ -64,6 +66,9 @@ config = ModelConfig(
     context_length=4096,
     batch_size=512,
     micro_batch_size=0,
+    cpu_profile="auto",
+    reserve_cores=1,
+    auto_batch_size=False,
     threads=0,
     batch_threads=0,
     gpu_layers=0,
@@ -71,6 +76,7 @@ config = ModelConfig(
     use_mlock=False,
     offload_kqv=True,
     flash_attention=False,
+    warmup=False,
     max_new_tokens=256,
     temperature=0.7,
     top_p=0.9,
@@ -85,13 +91,16 @@ config = ModelConfig(
 | `model_path` | GGUF file or OpenVINO GenAI directory. Relative paths are resolved immediately. |
 | `model_id` | Name used by the Python result and HTTP API. |
 | `backend` | `auto`, `llama-cpp` or `openvino`. Auto selects llama.cpp for `.gguf`. |
-| `device` | OpenVINO target such as `CPU`, `GPU` or `NPU`. |
+| `device` | OpenVINO target such as `CPU`, `GPU`, `NPU`, or `AUTO` (GPU → NPU → CPU). |
 | `data_dir` | SQLite state and compiled-cache directory; defaults to `~/.kernelloom`. |
 | `context_length` | llama.cpp context window. Minimum accepted value is 128. |
 | `batch_size` | llama.cpp prompt-processing batch size. |
 | `micro_batch_size` | Physical llama.cpp batch size; zero selects up to 128. Lower it to reduce peak memory. |
+| `auto_batch_size` | Let the selected CPU profile choose a starting batch and micro-batch size. |
 | `threads` | llama.cpp CPU threads. Zero selects logical CPUs minus one. |
 | `batch_threads` | Prompt-processing threads; zero follows `threads`. |
+| `cpu_profile` | `auto`, `latency`, `balanced`, `throughput`, or `efficient`; explicit thread values win. |
+| `reserve_cores` | Process-visible cores to leave available for the OS/application when using a CPU profile. |
 | `gpu_layers` | Number of llama.cpp layers to offload; zero keeps execution on CPU. |
 | `use_mmap`, `use_mlock` | Map weights from disk or request that mapped pages stay in RAM. |
 | `offload_kqv` | Offload K/Q/V operations when the llama.cpp build supports it. |
@@ -105,6 +114,8 @@ config = ModelConfig(
 | `system_prompt` | Added when the supplied messages do not already contain a system message. |
 | `device_config` | OpenVINO device properties accepted by the worker allow-list. |
 | `scheduler` | OpenVINO GenAI continuous-batching scheduler settings. |
+| `warmup`, `warmup_prompt`, `warmup_tokens` | Bounded local work after loading to reduce first-request cold latency. |
+| `embedding_cache_size`, `embedding_cache_max_bytes`, `token_cache_size` | Bounds for exact-match local embedding/token caches. |
 
 Per-call generation values override the configuration defaults.
 
@@ -224,6 +235,10 @@ config = ModelConfig(
     batch_size=512,
     context_length=4096,
     gpu_layers=0,
+    cpu_profile="balanced",
+    reserve_cores=1,
+    auto_batch_size=True,
+    warmup=True,
 )
 ```
 
@@ -236,6 +251,10 @@ Practical tuning order:
 5. Lower `micro_batch_size` if prompt processing spikes memory.
 6. Try `use_mlock=True` only when the process is allowed to lock enough RAM.
 7. Keep `gpu_layers=0` for a CPU-only runtime.
+
+Use `from kernelloom import plan_cpu_execution` to inspect the exact starting
+thread and batch recommendation for `latency`, `balanced`, `throughput`, or
+`efficient`. See [CPU-first runtime](CPU_FIRST.md) for cache and warmup details.
 
 Measure the result with `kernelloom benchmark MODEL PROMPT --runs 5`. The
 reported characters per second is deliberately labelled as such; it is not a
@@ -261,7 +280,7 @@ Then select a device:
 config = ModelConfig(
     "./models/model-openvino",
     backend="openvino",
-    device="GPU",
+    device="AUTO",  # prefers a verified GPU, then NPU, then CPU
     scheduler={
         "enabled": True,
         "enable_prefix_caching": True,

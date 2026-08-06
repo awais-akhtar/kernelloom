@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from .config import ModelConfig
+from .cpu import plan_cpu_execution
 from .model import KernelLoomModel
 from .settings import load_runtime_config
 
@@ -41,6 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
     embed = subparsers.add_parser("embed", help="Create a vector with a local GGUF embedding model")
     _model_arguments(embed)
     embed.add_argument("text")
+
+    warm = subparsers.add_parser("warm", help="Load and warm a local model before serving traffic")
+    _model_arguments(warm)
+    warm.add_argument("--prompt", default="KernelLoom warmup.")
+    warm.add_argument("--iterations", type=int, default=1)
+    warm.add_argument("--max-tokens", type=int, default=1)
+    warm.add_argument("--embedding", action="store_true", help="Warm the embedding path instead of generation")
+
+    cpu_plan = subparsers.add_parser("cpu-plan", help="Show a reproducible CPU inference starting plan")
+    cpu_plan.add_argument("--profile", choices=("auto", "latency", "balanced", "throughput", "efficient"), default="auto")
+    cpu_plan.add_argument("--reserve-cores", type=int, default=1)
+    cpu_plan.add_argument("--available-cores", type=int, default=None)
 
     inspect = subparsers.add_parser("inspect", help="Inspect a local model without loading its weights")
     inspect.add_argument("model_path")
@@ -74,6 +87,9 @@ def _model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--micro-batch-size", type=int, default=0)
     parser.add_argument("--threads", type=int, default=0)
     parser.add_argument("--batch-threads", type=int, default=0)
+    parser.add_argument("--cpu-profile", choices=("auto", "latency", "balanced", "throughput", "efficient"), default="auto")
+    parser.add_argument("--reserve-cores", type=int, default=1)
+    parser.add_argument("--auto-batch-size", action="store_true")
     parser.add_argument("--gpu-layers", type=int, default=0)
     parser.add_argument("--flash-attention", action="store_true")
     parser.add_argument("--mlock", action="store_true")
@@ -83,6 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "doctor":
         _doctor()
+        return 0
+    if args.command == "cpu-plan":
+        print(json.dumps(plan_cpu_execution(
+            args.profile, reserve_cores=args.reserve_cores, available_cores=args.available_cores,
+        ).to_dict(), indent=2))
         return 0
     if args.command in {"hardware", "inspect"}:
         from openagent_engine import AdaptiveExecutionEngine, HardwareProfiler
@@ -97,9 +118,9 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             engine.close()
         return 0
-    if args.command in {"run", "chat", "benchmark", "embed"}:
+    if args.command in {"run", "chat", "benchmark", "embed", "warm"}:
         config = _config_from_args(args)
-        if args.command == "embed":
+        if args.command == "embed" or (args.command == "warm" and args.embedding):
             config.embedding = True
         with KernelLoomModel(config) as model:
             if args.command == "run":
@@ -109,9 +130,13 @@ def main(argv: list[str] | None = None) -> int:
                 _interactive_chat(model, args.max_tokens, args.temperature)
             elif args.command == "benchmark":
                 _benchmark(model, args.prompt, args.runs, args.max_tokens)
-            else:
+            elif args.command == "embed":
                 vector = model.embed(args.text)
                 print(json.dumps({"model": model.config.model_id, "dimensions": len(vector), "embedding": vector}))
+            else:
+                print(json.dumps(model.warmup(
+                    args.prompt, iterations=args.iterations, max_new_tokens=args.max_tokens,
+                ), indent=2))
         return 0
 
     try:
@@ -150,6 +175,9 @@ def _config_from_args(args: argparse.Namespace) -> ModelConfig:
         micro_batch_size=args.micro_batch_size,
         threads=args.threads,
         batch_threads=args.batch_threads,
+        cpu_profile=args.cpu_profile,
+        reserve_cores=args.reserve_cores,
+        auto_batch_size=args.auto_batch_size,
         gpu_layers=args.gpu_layers,
         flash_attention=args.flash_attention,
         use_mlock=args.mlock,
@@ -206,7 +234,7 @@ def _benchmark(model: KernelLoomModel, prompt: str, runs: int, max_tokens: int) 
 
 
 def _doctor() -> None:
-    packages = ("llama_cpp", "openvino", "openvino_genai", "fastapi", "langchain_core")
+    packages = ("llama_cpp", "openvino", "openvino_genai", "fastapi", "langchain_core", "faiss", "fastembed")
     print(json.dumps({
         "python": sys.version.split()[0],
         "platform": platform.platform(),

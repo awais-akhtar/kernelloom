@@ -18,6 +18,13 @@ For local GGUF models, install the llama.cpp extra:
 pip install "kernelloom[llama]"
 ```
 
+For a CPU-optimized ONNX embedding model plus native FAISS retrieval, install
+the RAG extra. Both dependencies stay local and are optional:
+
+```bash
+pip install "kernelloom[rag]"
+```
+
 ## Five-minute persistent RAG
 
 ```python
@@ -122,6 +129,63 @@ for item in results:
 
 Metadata filters use exact equality in the built-in stores. A custom vector
 store can interpret filters using its database's native filter language.
+
+## Fast CPU embeddings and FAISS search
+
+The standard-library SQLite store is portable and persistent. For bigger local
+collections, use `FastEmbedEmbedder` (local ONNX Runtime models) and
+`FaissVectorStore` (native CPU similarity search):
+
+```python
+from kernelloom import FaissVectorStore, FastEmbedEmbedder, RAGConfig, RAGPipeline
+
+embeddings = FastEmbedEmbedder(
+    "BAAI/bge-small-en-v1.5",
+    threads=4,
+    batch_size=128,
+)
+rag = RAGPipeline(
+    chat_model,
+    embeddings,
+    store=FaissVectorStore(metric="cosine"),
+    config=RAGConfig(namespace="manuals", retrieval="similarity", top_k=6),
+)
+rag.ingest("./manuals", batch_size=128)
+rag.warmup(["How do I install this product?"])
+print(rag.ask("How do I install this product?").answer)
+```
+
+`RAGPipeline.local(..., database="faiss")` is a convenient alternative when
+using a KernelLoom GGUF embedding model. FAISS indexes are in-memory by design;
+persist source documents and rebuild at startup, or implement `VectorStore` for
+a persistent database. Use FAISS without metadata filters for the fastest path;
+when filters are supplied the adapter scans its namespace's candidates to keep
+filter results correct.
+
+FastEmbed can download a selected model on first use. For strictly offline or
+air-gapped use, pre-populate its local model cache or use a GGUF embedding model
+already present on disk.
+
+## Warm RAG and repeat-query cache
+
+Models remain resident until closed. `RAGPipeline.warmup()` can prime the
+generator, embedding backend, FAISS index, and known startup queries before
+serving traffic:
+
+```python
+startup = rag.warmup([
+    "What does this documentation cover?",
+    "How do I contact support?",
+])
+print(startup)
+print(rag.cache_info())
+```
+
+`RAGConfig.query_cache_size` and `query_cache_ttl_seconds` control a bounded
+exact-query retrieval cache (defaults: 256 entries and 30 seconds). Ingestion
+and clearing a namespace invalidate it, so freshly indexed content is visible
+immediately. KernelLoom model embedding/token caches use separate compact,
+bounded LRU storage; see the [CPU-first guide](CPU_FIRST.md) for sizing.
 
 ## Use a custom embedding provider
 

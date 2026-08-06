@@ -1003,6 +1003,24 @@ class AdaptiveExecutionEngine:
 
     def _direct_target(self, devices: tuple[DeviceProfile, ...], requested: str) -> tuple[DeviceProfile, str]:
         clean = requested.strip()
+        if clean.lower() in {"auto", "auto:0"}:
+            # Prefer a real local accelerator when one is exposed, but always
+            # keep CPU as the dependable fallback for the many CPU-only hosts.
+            device = next(
+                (
+                    item
+                    for kind in ("gpu", "npu", "cpu")
+                    for item in devices
+                    if item.kind == kind and "openvino" in item.backends
+                ),
+                None,
+            )
+            if device is None:
+                raise AdaptiveRuntimeError("No OpenVINO CPU, GPU, or NPU target is available for AUTO selection.")
+            target = openvino_device_id(device)
+            if not target:
+                raise AdaptiveRuntimeError(f"OpenVINO did not expose {device.name}")
+            return device, target
         device = next(
             (
                 item for item in devices

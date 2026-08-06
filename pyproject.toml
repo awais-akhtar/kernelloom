@@ -59,6 +59,16 @@ server = [
 langchain = [
   "langchain-core>=0.3.40"
 ]
+fastembed = [
+  "fastembed>=0.4"
+]
+faiss = [
+  "faiss-cpu>=1.8"
+]
+rag = [
+  "fastembed>=0.4",
+  "faiss-cpu>=1.8"
+]
 all = [
   "fastapi>=0.115",
   "langchain-core>=0.3.40",

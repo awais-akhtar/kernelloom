@@ -121,3 +121,24 @@ def test_http_local_embeddings_endpoint() -> None:
         path.write_bytes(b"test")
         with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
             asyncio.run(exercise(path))
+
+
+def test_server_reuses_identical_warm_model_and_exposes_warmup() -> None:
+    async def exercise(path: Path) -> None:
+        app = create_app()
+        first = app.state.models.load({"model_path": str(path), "model_id": "embed", "embedding": True})
+        second = app.state.models.load({"model_path": str(path), "model_id": "embed", "embedding": True})
+        assert first["id"] == "embed"
+        assert second["reused"] is True
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/models/embed/warm", json={"iterations": 2})
+            assert response.status_code == 200
+            assert response.json()["kind"] == "embedding"
+        app.state.models.close()
+
+    with tempfile.TemporaryDirectory() as temp:
+        path = Path(temp) / "embed.gguf"
+        path.write_bytes(b"test")
+        with patch.dict(sys.modules, {"llama_cpp": SimpleNamespace(Llama=FakeLlama)}):
+            asyncio.run(exercise(path))

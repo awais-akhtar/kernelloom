@@ -109,6 +109,7 @@ service before using it across an untrusted network.
 | `GET` | `/metrics` | Dependency-free Prometheus text metrics. |
 | `GET` | `/v1/models` | List resident models. |
 | `POST` | `/v1/models/load` | Load or replace a named model. |
+| `POST` | `/v1/models/{model_id}/warm` | Run bounded local warmup work without replacing a resident model. |
 | `DELETE` | `/v1/models/{model_id}` | Unload a resident model. |
 | `POST` | `/v1/chat/completions` | Chat completion, with optional SSE streaming. |
 | `POST` | `/v1/completions` | Plain text completion. |
@@ -137,7 +138,20 @@ curl http://127.0.0.1:11435/v1/models/load \
 ```
 
 The body accepts the fields defined by `ModelConfig`. Loading another model
-with the same `model_id` replaces and closes the previous instance.
+with the same `model_id` replaces and closes the previous instance. Loading the
+same normalized configuration reuses the existing warm model instead. Set
+`"warmup": true` in the load body or configuration file to warm it during load.
+
+Warm an existing model explicitly:
+
+```bash
+curl http://127.0.0.1:11435/v1/models/assistant/warm \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Warm the local assistant.","iterations":1,"max_tokens":1}'
+```
+
+For an embedding model, the route warms the native embedding path rather than
+generation. It returns measured warmup latency and keeps the model resident.
 
 An OpenVINO example:
 
